@@ -18,29 +18,42 @@ def candles(n: int, *, gap_at: int | None = None) -> tuple[Candle, ...]:
 
 def test_valid_candle_history():
     cs = candles(40)
-    r = validate_candles(cs, "M1", decision_time_utc=cs[-1].time_utc, minimum_history=32, max_missing_ratio=0.01)
+    decision = cs[-1].time_utc + timedelta(minutes=1)
+    r = validate_candles(cs, "M1", decision_time_utc=decision, minimum_history=32, max_missing_ratio=0.01)
     assert r.valid
     assert r.quality_score == 1.0
 
 
 def test_missing_candle_rejected():
     cs = candles(40, gap_at=20)
-    r = validate_candles(cs, "M1", decision_time_utc=cs[-1].time_utc, minimum_history=32, max_missing_ratio=0.01)
+    decision = cs[-1].time_utc + timedelta(minutes=1)
+    r = validate_candles(cs, "M1", decision_time_utc=decision, minimum_history=32, max_missing_ratio=0.01)
     assert not r.valid
     assert r.missing_ratio > 0.01
 
 
-def test_future_candle_rejected():
+def test_long_session_gap_is_not_called_missing_without_calendar():
+    first = candles(20)
+    shift = timedelta(days=2)
+    second = tuple(c.model_copy(update={"time_utc": c.time_utc + shift}) for c in candles(20))
+    cs = first + second
+    decision = cs[-1].time_utc + timedelta(minutes=1)
+    r = validate_candles(cs, "M1", decision_time_utc=decision, minimum_history=32, max_missing_ratio=0.01)
+    assert r.missing_ratio == 0.0
+
+
+def test_incomplete_candle_rejected():
     cs = candles(40)
-    r = validate_candles(cs, "M1", decision_time_utc=cs[-2].time_utc, minimum_history=32, max_missing_ratio=0.01)
+    r = validate_candles(cs, "M1", decision_time_utc=cs[-1].time_utc, minimum_history=32, max_missing_ratio=0.01)
     assert not r.valid
-    assert any("future candle" in reason for reason in r.reasons)
+    assert any("future/incomplete" in reason for reason in r.reasons)
 
 
 def test_duplicate_candle_rejected():
     cs = candles(40)
     dup = cs + (cs[-1],)
-    r = validate_candles(dup, "M1", decision_time_utc=cs[-1].time_utc, minimum_history=32, max_missing_ratio=0.01)
+    decision = cs[-1].time_utc + timedelta(minutes=1)
+    r = validate_candles(dup, "M1", decision_time_utc=decision, minimum_history=32, max_missing_ratio=0.01)
     assert not r.valid
     assert r.duplicate_count == 1
 

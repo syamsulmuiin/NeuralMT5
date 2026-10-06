@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import time
 import ipaddress
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from config.settings import SUPPORTED_TIMEFRAMES, Settings, TradingMode
+from config.timezones import resolve_timezone
+from layer1_market.timeframes import TIMEFRAME_MINUTES
 
 
 
@@ -34,6 +35,9 @@ def validate_settings(settings: Settings) -> Settings:
     if invalid:
         raise ValueError(f"Unsupported timeframe(s): {', '.join(invalid)}")
 
+    if not (TIMEFRAME_MINUTES[settings.htf.upper()] > TIMEFRAME_MINUTES[settings.mtf.upper()] > TIMEFRAME_MINUTES[settings.ltf.upper()]):
+        raise ValueError("Timeframes must satisfy HTF > MTF > LTF")
+
     weight_sum = sum(settings.brainflow_weights)
     if abs(weight_sum - 1.0) > 1e-9:
         raise ValueError(f"Brainflow weights must sum to 1.0, got {weight_sum:.12f}")
@@ -44,8 +48,8 @@ def validate_settings(settings: Settings) -> Settings:
         raise ValueError("MAX_CORRELATED_EXPOSURE cannot exceed MAX_TOTAL_EXPOSURE")
 
     try:
-        ZoneInfo(settings.trading_timezone)
-    except ZoneInfoNotFoundError as exc:
+        resolve_timezone(settings.trading_timezone)
+    except ValueError as exc:
         raise ValueError(f"TRADING_TIMEZONE is invalid: {settings.trading_timezone}") from exc
 
     _parse_hhmm("TRADING_SESSION_START", settings.trading_session_start)

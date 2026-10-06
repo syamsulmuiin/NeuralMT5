@@ -29,6 +29,7 @@ from layer1_market.regime import detect_regime
 from layer1_market.sequences import synchronize_sequences
 from layer1_market.structure import analyze_structure
 from layer1_market.symbol_resolver import resolve_many
+from layer1_market.timeframes import timeframe_delta
 from layer1_market.validator import is_tick_stale, validate_candles
 from layer2_brain.inference import infer
 from layer2_brain.opportunity import evaluate_neural_opportunity
@@ -126,6 +127,7 @@ class NeuralMT5Runtime:
             all_specs,
             min_confidence=self.settings.min_symbol_resolution_confidence,
             overrides=overrides,
+            exclude_tokens=self.settings.symbol_exclude_tokens,
         )
         by_name = {spec.name: spec for spec in all_specs}
         self._specs = {
@@ -160,6 +162,7 @@ class NeuralMT5Runtime:
     def run_once(self) -> RuntimeCycleResult:
         self._process_commands()
         self._maintain_positions()
+        self._account = discover_account(self.client)
         cycle_id = str(uuid4())
         started = datetime.now(UTC)
         self.store.begin_cycle(cycle_id, started)
@@ -200,7 +203,7 @@ class NeuralMT5Runtime:
                 return "HOLD"
             candles[tf] = data
             rows[tf] = build_feature_rows(data, tf, atr_period=self.settings.atr_period, momentum_period=self.settings.momentum_period, volatility_period=self.settings.volatility_period)
-        decision_time = rows[self.settings.ltf][-1].timestamp_utc
+        decision_time = rows[self.settings.ltf][-1].timestamp_utc + timeframe_delta(self.settings.ltf)
         sequences = synchronize_sequences(
             htf_rows=rows[self.settings.htf], mtf_rows=rows[self.settings.mtf], ltf_rows=rows[self.settings.ltf],
             htf=self.settings.htf, mtf=self.settings.mtf, ltf=self.settings.ltf,
@@ -322,15 +325,13 @@ class NeuralMT5Runtime:
             return
         if self.state.mode is RuntimeMode.PAPER:
             for row in records:
-                spec = next((x for x in self._specs.values() if x.name == row["symbol"] if "symbol" in row), None)
-                if spec is None:
-                    # symbol lives in the persisted request for older databases
-                    try:
-                        response = json.loads(row.get("response_payload_json") or "{}")
-                        symbol = response.get("symbol")
-                    except Exception:
-                        symbol = None
-                    spec = next((x for x in self._specs.values() if x.name == symbol), None)
+                # Symbol is authoritative in the persisted execution request.
+                try:
+                    request = json.loads(row.get("request_payload_json") or "{}")
+                    symbol = request.get("symbol")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    symbol = None
+                spec = next((x for x in self._specs.values() if x.name == symbol), None)
                 if spec is None:
                     continue
                 quote = self._current_quote(spec)

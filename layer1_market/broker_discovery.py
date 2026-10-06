@@ -35,6 +35,7 @@ def symbol_spec_from_mt5(info: Any) -> BrokerSymbolSpec:
         execution_mode=int(_read(info, "trade_exemode", 0) or 0),
         spread_points=float(_read(info, "spread", 0.0) or 0.0),
         visible=bool(_read(info, "visible", True)),
+        custom=bool(_read(info, "custom", False)),
     )
 
 

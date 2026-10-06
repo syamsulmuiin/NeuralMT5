@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, time
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from config.settings import Settings
+from config.timezones import resolve_timezone
 from contracts.domain import Direction
 from layer1_market.models import BrokerSymbolSpec
 from layer3_execution.models import MarketQuote, PlannedTrade, PreflightResult
@@ -37,10 +37,7 @@ def execution_preflight(
     if slippage_points > settings.max_slippage_points + 1e-12:
         reasons.append("slippage limit exceeded")
 
-    try:
-        session_tz = ZoneInfo(settings.trading_timezone)
-    except ZoneInfoNotFoundError as exc:
-        raise ValueError(f"invalid TRADING_TIMEZONE: {settings.trading_timezone}") from exc
+    session_tz = resolve_timezone(settings.trading_timezone)
     now = now_utc.astimezone(session_tz).time().replace(tzinfo=None)
     start = _hhmm(settings.trading_session_start)
     end = _hhmm(settings.trading_session_end)

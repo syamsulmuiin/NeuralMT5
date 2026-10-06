@@ -36,13 +36,23 @@ def test_brainflow_is_zero_one():
 
 def test_model_artifact_enforces_scaler_and_feature_pairing(tmp_path):
  from layer2_brain.artifacts import save_model_artifact,load_model_artifact
- set_deterministic(3); m=MultiTimeframeBrain(2,8,0); p=tmp_path/'m.pt'; meta=save_model_artifact(m,p,feature_names=('a','b'),network_version='n1',scaler_version='s1',random_seed=3)
+ set_deterministic(3); m=MultiTimeframeBrain(2,8,0); p=tmp_path/'m.pt'; meta=save_model_artifact(m,p,feature_names=('a','b'),feature_version='f1',network_version='n1',scaler_version='s1',random_seed=3)
  assert len(meta['weights_hash'])==64
- target=MultiTimeframeBrain(2,8,0); load_model_artifact(p,target,expected_feature_names=('a','b'),expected_scaler_version='s1')
- with pytest.raises(ValueError,match='scaler'): load_model_artifact(p,target,expected_feature_names=('a','b'),expected_scaler_version='wrong')
+ target=MultiTimeframeBrain(2,8,0); load_model_artifact(p,target,expected_feature_names=('a','b'),expected_feature_version='f1',expected_scaler_version='s1')
+ with pytest.raises(ValueError,match='scaler'): load_model_artifact(p,target,expected_feature_names=('a','b'),expected_feature_version='f1',expected_scaler_version='wrong')
 
 def test_multitask_training_baseline_changes_weights():
  from layer2_brain.trainer import TrainingBatch,train_epoch
  set_deterministic(4); m=MultiTimeframeBrain(2,8,0); before={k:v.clone() for k,v in m.state_dict().items()}; opt=torch.optim.Adam(m.parameters(),lr=.001)
  x=torch.randn(2,8,2); b=TrainingBatch(x,x,x,torch.tensor([0,2]),torch.tensor([[.8,.7],[.2,.3]]),torch.tensor([[1.,.5],[.2,.8]]))
  loss=train_epoch(m,[b],opt); assert loss>0; assert any(not torch.equal(before[k],v) for k,v in m.state_dict().items())
+
+
+def test_model_rejects_scaler_content_hash_mismatch(tmp_path):
+    from layer2_brain.artifacts import save_model_artifact, load_model_artifact
+    set_deterministic(4)
+    m=MultiTimeframeBrain(2,8,0); p=tmp_path/'m2.pt'
+    save_model_artifact(m,p,feature_names=('a','b'),feature_version='f1',network_version='n1',scaler_version='s1',scaler_hash='abc',random_seed=4)
+    target=MultiTimeframeBrain(2,8,0)
+    with pytest.raises(ValueError,match='content hash'):
+        load_model_artifact(p,target,expected_feature_names=('a','b'),expected_feature_version='f1',expected_scaler_version='s1',expected_scaler_hash='changed')

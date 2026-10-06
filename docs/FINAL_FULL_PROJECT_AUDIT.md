@@ -27,7 +27,7 @@ The repository now closes the code-level Critical and H1–H5 blockers identifie
 
 ## Regression evidence
 
-The complete suite contains **112 tests** and passes after blocker closure. `python -m compileall` also passes.
+The complete suite contains **126 tests** and passes after blocker closure. `python -m compileall` also passes.
 
 ## Remaining real-host gate
 
@@ -51,3 +51,27 @@ LIVE_SOAK_TEST_PASSED=false
 must remain false until `REAL_HOST_VALIDATION.md` is completed on the target MT5 host.
 
 See `BLOCKER_CLOSURE.md` for the implementation-level closure details.
+
+
+## Full-code audit hardening update
+
+The post-training-CLI audit closed additional defects that were not exercised by the earlier synthetic-only tests:
+
+- candle/feature eligibility now uses candle **close time**, preventing forming HTF/MTF rows from entering point-in-time sequences;
+- training writes `storage/reports/training_data_diagnostics.json` and exposes `python train.py --diagnose`;
+- exact broker symbol names can resolve even when optional currency metadata is blank, while affix/alias candidates still require corroborating metadata;
+- feature generation was reduced from effectively quadratic history slicing to bounded rolling-window work;
+- MFE/MAE targets are direction-aware for BUY versus SELL;
+- balanced accuracy now scores all three classes and promotion requires minimum validation samples per class;
+- training splits use label horizon timestamps so forward targets cannot cross split boundaries;
+- paper position monitoring now reads the persisted execution request symbol correctly;
+- SQLite foreign keys and busy timeout are enabled on every runtime-store connection;
+- account equity is refreshed each runtime cycle before new risk sizing;
+- model loading verifies feature implementation version and scaler content hash, not version strings alone.
+
+The regression baseline after this audit is **126 tests passing** plus successful `compileall`. Real-host/broker evidence remains separate from software regression.
+
+## Documentation synchronization rule
+
+Repository documentation is treated as part of the software contract. Changes to CLI workflows, configuration, broker/symbol resolution, training/promotion, risk/execution/reconciliation, live-readiness, artifacts, APIs, or dependencies must update the corresponding active documentation and `.env.example` in the same change set. Development-history-only documents should not be reintroduced; Git history is the source of historical change records.
+

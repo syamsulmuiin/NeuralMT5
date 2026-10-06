@@ -5,7 +5,7 @@ import os
 from typing import Annotated
 
 from pydantic import BeforeValidator, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 SUPPORTED_TIMEFRAMES = frozenset(
@@ -28,7 +28,7 @@ def _csv_symbols(value: object) -> list[str]:
     raise TypeError("SYMBOLS must be a comma-separated string or a list")
 
 
-SymbolList = Annotated[list[str], BeforeValidator(_csv_symbols)]
+SymbolList = Annotated[list[str], NoDecode, BeforeValidator(_csv_symbols)]
 
 
 class Settings(BaseSettings):
@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     symbols: SymbolList = ["XAUUSD", "EURUSD"]
     min_symbol_resolution_confidence: float = Field(0.90, ge=0.0, le=1.0)
+    symbol_exclude_tokens: SymbolList = ["REPLAY", "REPALY", "PLAYBACK"]
 
     htf: str = "M15"
     mtf: str = "M5"
@@ -73,6 +74,11 @@ class Settings(BaseSettings):
     batch_size: int = Field(64, ge=1)
     epochs: int = Field(30, ge=1)
     random_seed: int = 42
+    train_history_bars: int = Field(5000, ge=500)
+    label_horizon_bars: int = Field(30, ge=2)
+    train_min_samples: int = Field(300, ge=50)
+    train_min_balanced_accuracy: float = Field(0.34, ge=0.0, le=1.0)
+    train_min_class_samples: int = Field(20, ge=1)
     dataset_version: str = "dataset-v1"
     model_artifact_path: str = "storage/models/champion.pt"
     scaler_artifact_path: str = "storage/scalers/champion.json"
@@ -126,8 +132,8 @@ class Settings(BaseSettings):
     retrain_enabled: bool = True
     shadow_mode_enabled: bool = True
     auto_promotion_enabled: bool = False
-    purge_bars: int = Field(20, ge=0)
-    embargo_bars: int = Field(20, ge=0)
+    purge_bars: int = Field(30, ge=0)
+    embargo_bars: int = Field(30, ge=0)
     min_challenger_trades: int = Field(100, ge=1)
     max_allowed_drawdown: float = Field(0.15, ge=0.0, le=1.0)
     min_expectancy_r: float = 0.0

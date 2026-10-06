@@ -12,6 +12,7 @@ _KNOWN_ALIASES: dict[str, tuple[str, ...]] = {
     "XAUUSD": ("XAUUSD", "GOLD"),
     "XAGUSD": ("XAGUSD", "SILVER"),
 }
+_DEFAULT_EXCLUDE_TOKENS = ("REPLAY", "REPALY", "PLAYBACK")
 
 
 def normalize_symbol(value: str) -> str:
@@ -34,9 +35,35 @@ class _Candidate:
     spec: BrokerSymbolSpec
     score: float
     reasons: tuple[str, ...]
+    rejected_reason: str | None = None
+
+    @property
+    def eligible(self) -> bool:
+        return self.rejected_reason is None
 
 
-def _score(canonical: str, spec: BrokerSymbolSpec) -> _Candidate:
+def _rejected_reason(spec: BrokerSymbolSpec, exclude_tokens: Sequence[str]) -> str | None:
+    # MT5 custom symbols are terminal-local synthetic instruments and must never be
+    # selected as live/training broker instruments.
+    if spec.custom:
+        return "custom MT5 symbol"
+    # 0=disabled, 3=close-only. Neither can accept a new trading position.
+    if spec.trade_mode in (0, 3):
+        return f"trade_mode={spec.trade_mode} cannot open new positions"
+
+    searchable = normalize_symbol(f"{spec.name} {spec.description} {spec.path}")
+    for raw in exclude_tokens:
+        token = normalize_symbol(raw)
+        if token and token in searchable:
+            return f"excluded token: {raw.upper()}"
+    return None
+
+
+def _score(canonical: str, spec: BrokerSymbolSpec, *, exclude_tokens: Sequence[str]) -> _Candidate:
+    rejected = _rejected_reason(spec, exclude_tokens)
+    if rejected:
+        return _Candidate(spec=spec, score=0.0, reasons=(), rejected_reason=rejected)
+
     canonical_n = normalize_symbol(canonical)
     name_n = normalize_symbol(spec.name)
     aliases = tuple(normalize_symbol(v) for v in _KNOWN_ALIASES.get(canonical_n, (canonical_n,)))
@@ -44,13 +71,16 @@ def _score(canonical: str, spec: BrokerSymbolSpec) -> _Candidate:
     reasons: list[str] = []
 
     if name_n == canonical_n:
-        score += 0.62
+        score += 0.92
         reasons.append("exact normalized symbol")
     elif any(name_n == alias for alias in aliases):
         score += 0.58
         reasons.append("known semantic alias")
     elif any(name_n.startswith(alias) or name_n.endswith(alias) for alias in aliases):
-        score += 0.56
+        # A canonical token at either edge of the broker symbol is a strong identity
+        # signal (e.g. XAUUSD.vx, XAUUSDm, mXAUUSD). It must be able to clear the
+        # default 0.90 threshold when broker metadata is partially populated.
+        score += 0.68
         reasons.append("canonical name with broker affix")
     elif any(alias in name_n for alias in aliases):
         score += 0.22
@@ -71,11 +101,35 @@ def _score(canonical: str, spec: BrokerSymbolSpec) -> _Candidate:
         score += 0.04
         reasons.append("description/path match")
 
-    if spec.trade_mode > 0:
+    if spec.trade_mode in (1, 2, 4):
         score += 0.02
         reasons.append("trade-enabled metadata")
 
     return _Candidate(spec=spec, score=min(score, 1.0), reasons=tuple(reasons))
+
+
+def inspect_symbol_candidates(
+    canonical: str,
+    symbols: Sequence[BrokerSymbolSpec],
+    *,
+    exclude_tokens: Sequence[str] = _DEFAULT_EXCLUDE_TOKENS,
+) -> list[dict[str, object]]:
+    """Return deterministic resolver diagnostics without changing selection behavior."""
+    candidates = [_score(canonical, s, exclude_tokens=exclude_tokens) for s in symbols]
+    candidates.sort(key=lambda c: (c.eligible, c.score, normalize_symbol(c.spec.name)), reverse=True)
+    return [
+        {
+            "broker_symbol": c.spec.name,
+            "eligible": c.eligible,
+            "score": round(c.score, 6),
+            "rejected_reason": c.rejected_reason,
+            "trade_mode": c.spec.trade_mode,
+            "custom": c.spec.custom,
+            "visible": c.spec.visible,
+            "reasons": list(c.reasons),
+        }
+        for c in candidates
+    ]
 
 
 def resolve_symbol(
@@ -85,6 +139,7 @@ def resolve_symbol(
     min_confidence: float = 0.90,
     override: str | None = None,
     ambiguity_margin: float = 0.03,
+    exclude_tokens: Sequence[str] = _DEFAULT_EXCLUDE_TOKENS,
 ) -> SymbolResolution:
     canonical = normalize_symbol(canonical)
     if not canonical:
@@ -94,11 +149,19 @@ def resolve_symbol(
         target = normalize_symbol(override)
         matches = [s for s in symbols if normalize_symbol(s.name) == target]
         if len(matches) == 1:
+            rejected = _rejected_reason(matches[0], exclude_tokens)
+            if rejected:
+                return SymbolResolution(
+                    canonical_symbol=canonical,
+                    broker_symbol=None,
+                    resolution_confidence=0.0,
+                    reason=f"manual override rejected: {rejected}",
+                )
             return SymbolResolution(
                 canonical_symbol=canonical,
                 broker_symbol=matches[0].name,
                 resolution_confidence=1.0,
-                reason="manual override matched broker symbol",
+                reason="manual override matched eligible broker symbol",
             )
         return SymbolResolution(
             canonical_symbol=canonical,
@@ -108,10 +171,19 @@ def resolve_symbol(
             ambiguous=len(matches) > 1,
         )
 
-    ranked = sorted((_score(canonical, s) for s in symbols), key=lambda c: c.score, reverse=True)
+    all_ranked = [_score(canonical, s, exclude_tokens=exclude_tokens) for s in symbols]
+    ranked = sorted((c for c in all_ranked if c.eligible), key=lambda c: c.score, reverse=True)
     if not ranked or ranked[0].score < min_confidence:
         best = ranked[0] if ranked else None
-        reason = "no candidate" if best is None else f"best candidate below threshold: {best.spec.name}={best.score:.3f}"
+        if best is None:
+            rejected = [c for c in all_ranked if c.rejected_reason]
+            if rejected:
+                details = ", ".join(f"{c.spec.name} ({c.rejected_reason})" for c in rejected[:3])
+                reason = f"no eligible candidate; rejected: {details}"
+            else:
+                reason = "no candidate"
+        else:
+            reason = f"best candidate below threshold: {best.spec.name}={best.score:.3f}"
         return SymbolResolution(
             canonical_symbol=canonical,
             broker_symbol=None,
@@ -143,6 +215,7 @@ def resolve_many(
     *,
     min_confidence: float,
     overrides: Mapping[str, str | None] | None = None,
+    exclude_tokens: Sequence[str] = _DEFAULT_EXCLUDE_TOKENS,
 ) -> dict[str, SymbolResolution]:
     overrides = overrides or {}
     return {
@@ -151,6 +224,7 @@ def resolve_many(
             symbols,
             min_confidence=min_confidence,
             override=overrides.get(normalize_symbol(c)),
+            exclude_tokens=exclude_tokens,
         )
         for c in canonicals
     }

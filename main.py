@@ -7,6 +7,7 @@ all explicit Phase 7 host-readiness gates pass.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import signal
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from config.settings import Settings, TradingMode
 from config.validation import validate_settings
 from dashboard.isolation import start_dashboard_isolated
 from layer1_market.mt5_client import MT5Client
+from layer1_market.features import FEATURE_VERSION
 from layer2_brain.artifacts import load_model_artifact
 from layer2_brain.network import MultiTimeframeBrain, set_deterministic
 from layer2_brain.scaler import StandardScalerArtifact
@@ -37,13 +39,16 @@ def _load_brain(settings: Settings):
     if not model_path.exists():
         raise FileNotFoundError(f"model artifact not found: {model_path}")
     scaler = StandardScalerArtifact.load(scaler_path)
+    scaler_hash = hashlib.sha256(scaler_path.read_bytes()).hexdigest()
     set_deterministic(settings.random_seed)
     model = MultiTimeframeBrain(len(scaler.feature_names), settings.hidden_size, settings.dropout)
     load_model_artifact(
         model_path,
         model,
         expected_feature_names=scaler.feature_names,
+        expected_feature_version=FEATURE_VERSION,
         expected_scaler_version=scaler.version,
+        expected_scaler_hash=scaler_hash,
     )
     return model, scaler
 

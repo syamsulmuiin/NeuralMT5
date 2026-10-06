@@ -11,6 +11,7 @@ from layer1_market.models import BrokerSymbolSpec, Candle
 from layer1_market.orderflow import build_orderflow_proxy
 from layer1_market.regime import detect_regime
 from layer1_market.sequences import synchronize_sequences
+from layer1_market.timeframes import timeframe_delta
 from layer1_market.structure import analyze_structure
 from layer2_brain.inference import infer
 from layer2_brain.opportunity import evaluate_neural_opportunity
@@ -89,14 +90,14 @@ def run_historical_pipeline(
     trades: list[BacktestTrade] = []
 
     for i in range(minimum - 1, len(ltf_all) - 1):
-        decision_time = ltf_all[i].time_utc
+        decision_time = ltf_all[i].time_utc + timeframe_delta(settings.ltf)
         # Keep the replay serial: do not open another trade until the previous one exited.
         if trades and trades[-1].exit_time_utc >= decision_time:
             continue
         histories = {
-            settings.htf: tuple(c for c in htf_all if c.time_utc <= decision_time),
-            settings.mtf: tuple(c for c in mtf_all if c.time_utc <= decision_time),
-            settings.ltf: tuple(c for c in ltf_all[: i + 1] if c.time_utc <= decision_time),
+            settings.htf: tuple(c for c in htf_all if c.time_utc + timeframe_delta(settings.htf) <= decision_time),
+            settings.mtf: tuple(c for c in mtf_all if c.time_utc + timeframe_delta(settings.mtf) <= decision_time),
+            settings.ltf: tuple(c for c in ltf_all[: i + 1] if c.time_utc + timeframe_delta(settings.ltf) <= decision_time),
         }
         if any(len(histories[tf]) < max(warmup, 3) for tf in (settings.htf, settings.mtf, settings.ltf)):
             continue

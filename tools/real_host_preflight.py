@@ -37,6 +37,7 @@ def main() -> int:
             settings.symbols, specs,
             min_confidence=settings.min_symbol_resolution_confidence,
             overrides={},
+            exclude_tokens=settings.symbol_exclude_tokens,
         )
         by_name = {s.name: s for s in specs}
         selected = []

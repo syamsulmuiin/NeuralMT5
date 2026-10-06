@@ -11,19 +11,26 @@ def rows(tf: str, minutes: int, n: int) -> tuple[FeatureRow, ...]:
     return tuple(FeatureRow(timestamp_utc=start + timedelta(minutes=i * minutes), timeframe=tf, feature_version="x", values={"x": float(i)}) for i in range(n))
 
 
-def test_sequence_never_reads_after_decision_time():
+def test_sequence_uses_only_closed_rows():
     rs = rows("M1", 1, 20)
     decision = rs[9].timestamp_utc
     seq = build_sequence(rs, "M1", 5, decision)
     assert len(seq.rows) == 5
-    assert seq.rows[-1].timestamp_utc == decision
-    assert all(r.timestamp_utc <= decision for r in seq.rows)
+    assert seq.rows[-1].timestamp_utc == rs[8].timestamp_utc
+    assert all(r.timestamp_utc + timedelta(minutes=1) <= decision for r in seq.rows)
+
+
+def test_sequence_includes_candle_after_its_close():
+    rs = rows("M5", 5, 20)
+    decision = rs[9].timestamp_utc + timedelta(minutes=5)
+    seq = build_sequence(rs, "M5", 5, decision)
+    assert seq.rows[-1].timestamp_utc == rs[9].timestamp_utc
 
 
 def test_insufficient_history_is_rejected_not_padded():
     rs = rows("M1", 1, 4)
     with pytest.raises(ValueError, match="insufficient"):
-        build_sequence(rs, "M1", 5, rs[-1].timestamp_utc)
+        build_sequence(rs, "M1", 5, rs[-1].timestamp_utc + timedelta(minutes=1))
 
 
 def test_multitimeframe_windows_are_independent():

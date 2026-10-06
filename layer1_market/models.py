@@ -58,6 +58,7 @@ class BrokerSymbolSpec(FrozenModel):
     execution_mode: int
     spread_points: float = Field(ge=0.0)
     visible: bool = True
+    custom: bool = False
 
 
 class AccountSnapshot(FrozenModel):

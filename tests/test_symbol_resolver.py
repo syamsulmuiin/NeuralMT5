@@ -57,3 +57,55 @@ def test_manual_override_requires_exact_broker_name():
     assert ok.broker_symbol == "XAUUSD.vx"
     missing = resolve_symbol("XAUUSD", [s], override="XAUUSD.bad")
     assert missing.broker_symbol is None
+
+
+def test_exact_symbol_resolves_even_when_optional_currency_metadata_is_blank():
+    s = spec("XAUUSD", base="", profit="", description="", path="")
+    r = resolve_symbol("XAUUSD", [s])
+    assert r.broker_symbol == "XAUUSD"
+    assert r.resolution_confidence >= 0.90
+
+
+def test_replay_symbol_is_hard_rejected_and_real_suffix_wins():
+    real = spec("XAUUSD.vx")
+    replay = spec("XAUUSDreplay")
+    r = resolve_symbol("XAUUSD", [replay, real])
+    assert r.broker_symbol == "XAUUSD.vx"
+    assert r.resolution_confidence >= 0.90
+
+
+def test_custom_symbol_is_hard_rejected_even_with_matching_metadata():
+    custom = spec("XAUUSD.synthetic", custom=True)
+    r = resolve_symbol("XAUUSD", [custom])
+    assert r.broker_symbol is None
+    assert "custom" in r.reason.lower()
+
+
+def test_close_only_symbol_is_not_entry_candidate():
+    close_only = spec("XAUUSD.vx", trade_mode=3)
+    r = resolve_symbol("XAUUSD", [close_only])
+    assert r.broker_symbol is None
+    assert "trade_mode=3" in r.reason
+
+
+def test_manual_override_cannot_bypass_replay_rejection():
+    replay = spec("XAUUSDreplay")
+    r = resolve_symbol("XAUUSD", [replay], override="XAUUSDreplay")
+    assert r.broker_symbol is None
+    assert "manual override rejected" in r.reason
+
+
+def test_suffix_symbol_resolves_with_partial_broker_currency_metadata():
+    # Some CFD brokers leave currency_base blank while still reporting the
+    # correct profit currency. A strong canonical+affix match must still resolve.
+    s = spec("XAUUSD.vx", base="", profit="USD")
+    r = resolve_symbol("XAUUSD", [s])
+    assert r.broker_symbol == "XAUUSD.vx"
+    assert r.resolution_confidence >= 0.90
+
+
+def test_unrelated_usd_profit_symbol_stays_far_below_threshold():
+    other = spec("XTIUSD.vx", base="XTI", profit="USD", description="WTI Crude Oil", path="Energy")
+    r = resolve_symbol("XAUUSD", [other])
+    assert r.broker_symbol is None
+    assert r.resolution_confidence < 0.30

@@ -28,6 +28,34 @@ copy .env.example .env
 
 Fill MT5 connection values and canonical symbols in `.env`. Keep `TRADING_MODE=analysis`.
 
+## Stage 0 — resolver and training-data diagnostics
+
+Before any soak or live-readiness test, verify that canonical symbols resolve to the intended broker symbols and that training data is actually usable:
+
+```powershell
+python train.py --diagnose
+```
+
+Review `storage/reports/training_data_diagnostics.json`. For each configured canonical symbol, confirm:
+
+- the selected `broker_symbol` is the intended tradable symbol;
+- replay/playback/custom symbols are rejected;
+- `trade_mode` allows opening new positions;
+- resolver confidence meets `MIN_SYMBOL_RESOLUTION_CONFIDENCE`;
+- HTF/MTF/LTF history counts meet minimum requirements;
+- feature and synchronized-sequence counts are non-zero;
+- class distribution is not degenerate.
+
+For brokers that expose multiple valid variants, keep the canonical symbol in `SYMBOLS` and use an explicit override only when needed, for example:
+
+```env
+SYMBOLS=XAUUSD
+SYMBOL_XAUUSD=XAUUSD.vx
+SYMBOL_EXCLUDE_TOKENS=REPLAY,REPALY,PLAYBACK
+```
+
+Manual overrides remain subject to the same safety checks; they cannot force a replay/custom/non-openable symbol. Do not lower the global resolver confidence threshold merely to make an incorrect candidate pass.
+
 ## Stage A — read-only host preflight
 
 Run:

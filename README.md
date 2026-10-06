@@ -23,7 +23,7 @@ The system is intentionally designed around **capital preservation, reproducibil
 | Dashboard & API | Implemented |
 | Integrated analysis/paper runtime | Implemented |
 | Software live-readiness controls | Implemented |
-| Automated regression baseline | **112 tests passing** |
+| Automated regression baseline | **126 tests passing** |
 | Real MT5 broker/host validation | **Pending** |
 | LIVE self-certification | **No** |
 
@@ -137,6 +137,25 @@ GOLD
 ```
 
 Resolution considers symbol identity plus broker metadata. Ambiguous resolution produces **NO TRADE** rather than guessing.
+
+---
+
+
+# Documentation Maintenance Policy
+
+Documentation is part of the implementation contract. Any change that affects user/developer behavior must update the relevant documentation in the same change set. This includes new or changed:
+
+- CLI commands and workflows;
+- `.env` keys/defaults;
+- training, promotion, forward-test, backtest, or live-readiness behavior;
+- API/WebSocket endpoints;
+- broker/symbol resolution rules;
+- risk, execution, reconciliation, or recovery behavior;
+- model/scaler/dataset artifact formats or compatibility rules;
+- dashboard controls;
+- install/runtime dependencies.
+
+At minimum, keep `README.md`, `.env.example`, `docs/FINAL_FULL_PROJECT_AUDIT.md`, and `docs/REAL_HOST_VALIDATION.md` synchronized when the affected topic belongs there. Historical implementation notes belong in Git history rather than new phase-history documents.
 
 ---
 
@@ -327,6 +346,8 @@ LIVE_READINESS_ACKNOWLEDGED=false
 LIVE_FAULT_INJECTION_PASSED=false
 LIVE_SOAK_TEST_PASSED=false
 ```
+
+`SYMBOLS` uses a plain comma-separated canonical format such as `SYMBOLS=XAUUSD,EURUSD`; JSON array syntax is not required. The resolver automatically maps each canonical symbol to one eligible broker symbol. Replay/playback/custom or non-openable symbols are rejected before ranking. If a broker has several legitimate variants and you need to force one, use an explicit override such as `SYMBOL_XAUUSD=XAUUSD.vx`; safety rejection still applies to manual overrides.
 
 Additional readiness checks include:
 
@@ -538,6 +559,10 @@ Typical development configuration:
 ```env
 TRADING_MODE=analysis
 SYMBOLS=XAUUSD,EURUSD
+SYMBOL_EXCLUDE_TOKENS=REPLAY,REPALY,PLAYBACK
+
+# Optional broker-specific override. Leave blank for auto-resolution.
+SYMBOL_XAUUSD=
 
 HTF=M15
 MTF=M5
@@ -566,6 +591,65 @@ See [`.env.example`](.env.example) for the complete configuration surface.
 ---
 
 # Running NeuralMT5
+
+
+## Train → Forward Test → Live Workflow
+
+NeuralMT5 does not create dummy model artifacts. Before the integrated runtime can perform neural inference, train a local Challenger from MT5 historical **closed candles**:
+
+```powershell
+python train.py --diagnose
+python train.py
+```
+
+`--diagnose` connects to MT5, resolves the configured symbols, inspects available HTF/MTF/LTF history, and reports exactly how many samples can be built without training. The report is saved to `storage/reports/training_data_diagnostics.json`.
+
+The training workflow resolves configured broker symbols, downloads historical HTF/MTF/LTF candles, builds point-in-time features and synchronized sequences, creates deterministic forward labels, performs a chronological train/validation/test split with purge/embargo, fits the scaler on the **training split only**, and trains the local CNN+GRU network. Outputs are:
+
+```text
+storage/models/challenger.pt
+storage/models/challenger.pt.json
+storage/scalers/challenger.json
+storage/reports/training_report.json
+```
+
+Training never replaces the active Champion automatically. Review `storage/reports/training_report.json`. If `passed` is `true`, promote that exact saved Challenger explicitly:
+
+```powershell
+python train.py --promote
+```
+
+Promotion does **not** retrain. It verifies the saved model/scaler hashes against the reviewed report, then installs:
+
+```text
+storage/models/champion.pt
+storage/models/champion.pt.json
+storage/scalers/champion.json
+```
+
+Then run forward analysis or paper testing:
+
+```powershell
+python main.py --run
+```
+
+Recommended `.env` progression is `TRADING_MODE=analysis` first, then `TRADING_MODE=paper`. LIVE remains gated by real-host readiness and must not be enabled merely because training succeeded. Training and Challenger promotion are blocked while `TRADING_MODE=live`.
+
+Training controls are configured in `.env`:
+
+```env
+TRAIN_HISTORY_BARS=5000
+LABEL_HORIZON_BARS=30
+TRAIN_MIN_SAMPLES=300
+TRAIN_MIN_BALANCED_ACCURACY=0.34
+TRAIN_MIN_CLASS_SAMPLES=20
+EPOCHS=30
+BATCH_SIZE=64
+LEARNING_RATE=0.001
+RANDOM_SEED=42
+```
+
+If training reports insufficient samples, run `python train.py --diagnose` first. The diagnostics distinguish unresolved symbols, `symbol_select` failure, missing broker history, insufficient feature history, sequence-alignment failures, and class distribution. Do not bypass the minimum-sample or validation gates with dummy artifacts.
 
 ## Safe configuration validation only
 
@@ -609,7 +693,8 @@ SCALER_ARTIFACT_PATH=storage/scalers/champion.json
 Runtime loading verifies compatibility between:
 
 - feature names/order;
-- scaler version;
+- feature implementation version;
+- scaler version and scaler content hash;
 - network artifact;
 - model metadata;
 - configured feature count.

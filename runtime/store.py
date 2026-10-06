@@ -20,7 +20,7 @@ class RuntimeStore:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).parents[1] / "storage/database/schema.sql"
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.executescript(schema.read_text(encoding="utf-8"))
             conn.executescript(
                 """
@@ -42,10 +42,16 @@ class RuntimeStore:
             if "mt5_deal_ticket" not in columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN mt5_deal_ticket INTEGER")
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=10.0)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 10000")
+        return conn
+
     def set_state(self, key: str, value: Any) -> None:
         now = datetime.now(UTC).isoformat()
         payload = json.dumps(value, sort_keys=True, default=str)
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT INTO runtime_state(key,value_json,updated_at_utc) VALUES(?,?,?)
                    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_utc=excluded.updated_at_utc""",
@@ -53,28 +59,28 @@ class RuntimeStore:
             )
 
     def get_state(self, key: str, default: Any = None) -> Any:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             row = conn.execute("SELECT value_json FROM runtime_state WHERE key=?", (key,)).fetchone()
         if not row:
             return default
         return json.loads(row[0])
 
     def begin_cycle(self, cycle_id: str, started_at_utc: datetime) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT INTO runtime_cycles(cycle_id,started_at_utc,status,details_json) VALUES(?,?,?,?)",
                 (cycle_id, started_at_utc.isoformat(), "RUNNING", "{}"),
             )
 
     def finish_cycle(self, cycle_id: str, status: str, details: dict[str, Any]) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE runtime_cycles SET completed_at_utc=?,status=?,details_json=? WHERE cycle_id=?",
                 (datetime.now(UTC).isoformat(), status, json.dumps(details, sort_keys=True, default=str), cycle_id),
             )
 
     def record_event(self, event_id: str, event_type: str, occurred_at_utc: datetime, source: str, correlation_id: str | None, payload: dict[str, Any]) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO system_events(event_id,event_type,occurred_at_utc,source,correlation_id,payload_json) VALUES(?,?,?,?,?,?)",
                 (event_id, event_type, occurred_at_utc.isoformat(), source, correlation_id, json.dumps(payload, sort_keys=True, default=str)),
@@ -92,7 +98,7 @@ class RuntimeStore:
         rejection_reason: str | None,
         versions: dict[str, Any],
     ) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO opportunities(
                     opportunity_id,observation_id,decided_at_utc,direction,buy_score,sell_score,hold_score,
@@ -106,7 +112,7 @@ class RuntimeStore:
             )
 
     def record_trade_plan(self, trade_plan_id: str, opportunity_id: str, plan: PlannedTrade) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO trade_plans(
                     trade_plan_id,opportunity_id,entry,stop_loss,take_profit,rr,risk_fraction,lot,
@@ -129,7 +135,7 @@ class RuntimeStore:
             "tp": plan.take_profit,
         }
         response = result.model_dump(mode="json")
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO orders(
                     order_id,trade_plan_id,mt5_order_ticket,mt5_deal_ticket,client_order_key,state,requested_at_utc,updated_at_utc,
@@ -149,13 +155,13 @@ class RuntimeStore:
                 )
 
     def open_journal_tickets(self) -> set[int]:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             rows = conn.execute("SELECT mt5_position_ticket FROM trades WHERE closed_at_utc IS NULL AND mt5_position_ticket IS NOT NULL").fetchall()
         return {int(row[0]) for row in rows}
 
     def current_risk_state(self, equity: float, *, candidate_currencies: set[str] | None = None, symbol_currencies: dict[str, set[str]] | None = None) -> RiskState:
         today = datetime.now(UTC).date().isoformat()
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             open_rows = conn.execute(
                 """SELECT p.risk_fraction,o.request_payload_json FROM trades t JOIN orders o ON o.order_id=t.order_id
                    JOIN trade_plans p ON p.trade_plan_id=o.trade_plan_id WHERE t.closed_at_utc IS NULL"""
@@ -170,7 +176,7 @@ class RuntimeStore:
             for risk_fraction, payload in open_rows:
                 try:
                     symbol = json.loads(payload).get("symbol")
-                except Exception:
+                except (TypeError, ValueError, json.JSONDecodeError):
                     symbol = None
                 currencies = symbol_currencies.get(symbol or "", set())
                 if currencies & candidate_currencies:
@@ -196,7 +202,7 @@ class RuntimeStore:
 
     def bind_execution_identity(self, order_id: str, *, order_ticket: int | None = None, deal_ticket: int | None = None, position_ticket: int | None = None, actual_entry: float | None = None, opened_at_utc: datetime | None = None) -> None:
         """Bind durable MT5 ids discovered after order_send without replacing audit history."""
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             if order_ticket is not None or deal_ticket is not None:
                 conn.execute(
                     "UPDATE orders SET mt5_order_ticket=COALESCE(?,mt5_order_ticket),mt5_deal_ticket=COALESCE(?,mt5_deal_ticket),updated_at_utc=? WHERE order_id=?",
@@ -216,10 +222,10 @@ class RuntimeStore:
                 )
 
     def open_trade_records(self) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT t.*,o.mt5_order_ticket,o.mt5_deal_ticket,o.state,o.response_payload_json,
+                """SELECT t.*,o.mt5_order_ticket,o.mt5_deal_ticket,o.state,o.request_payload_json,o.response_payload_json,
                           p.entry AS planned_entry,p.stop_loss,p.take_profit,p.lot,p.risk_fraction,p.estimated_loss_at_sl,
                           opp.direction
                    FROM trades t JOIN orders o ON o.order_id=t.order_id
@@ -230,7 +236,7 @@ class RuntimeStore:
         return [dict(r) for r in rows]
 
     def update_position_mark(self, position_ticket: int, *, mfe: float, mae: float) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             row = conn.execute("SELECT mfe,mae FROM trades WHERE mt5_position_ticket=? AND closed_at_utc IS NULL", (position_ticket,)).fetchone()
             if not row:
                 return
@@ -238,7 +244,7 @@ class RuntimeStore:
             conn.execute("UPDATE trades SET mfe=?,mae=? WHERE mt5_position_ticket=? AND closed_at_utc IS NULL", (max(old_mfe,mfe), max(old_mae,mae), position_ticket))
 
     def close_trade(self, position_ticket: int, *, closed_at_utc: datetime, exit_price: float, gross_pnl: float, commission: float, swap: float, net_pnl: float, exit_reason: str, slippage_points: float | None = None) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """SELECT t.trade_id,t.actual_entry,p.estimated_loss_at_sl FROM trades t
                    JOIN orders o ON o.order_id=t.order_id JOIN trade_plans p ON p.trade_plan_id=o.trade_plan_id
@@ -254,7 +260,7 @@ class RuntimeStore:
             )
 
     def paper_close_trade(self, trade_id: str, *, closed_at_utc: datetime, exit_price: float, gross_pnl: float, exit_reason: str) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """SELECT p.estimated_loss_at_sl FROM trades t JOIN orders o ON o.order_id=t.order_id JOIN trade_plans p ON p.trade_plan_id=o.trade_plan_id WHERE t.trade_id=? AND t.closed_at_utc IS NULL""", (trade_id,)
             ).fetchone()
@@ -264,7 +270,7 @@ class RuntimeStore:
             conn.execute("UPDATE trades SET closed_at_utc=?,exit_price=?,gross_pnl=?,commission=0.0,swap=0.0,net_pnl=?,realized_r=?,exit_reason=? WHERE trade_id=?", (closed_at_utc.isoformat(),exit_price,gross_pnl,gross_pnl,realized_r,exit_reason,trade_id))
 
     def update_trade_mark(self, trade_id: str, *, mfe: float, mae: float) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with self._connect() as conn:
             row = conn.execute("SELECT mfe,mae FROM trades WHERE trade_id=? AND closed_at_utc IS NULL", (trade_id,)).fetchone()
             if not row:
                 return

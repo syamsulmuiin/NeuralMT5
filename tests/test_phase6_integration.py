@@ -227,3 +227,26 @@ def test_multi_cycle_soak_keeps_runtime_healthy(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM runtime_cycles WHERE status='OK'").fetchone()[0] == 25
     assert runtime.state.last_error is None
     runtime.stop()
+
+
+def test_paper_position_monitor_can_resolve_persisted_symbol_and_close(tmp_path):
+    backend = FakeBackend()
+    s = settings(
+        tmp_path, trading_mode="paper", min_brainflow_score=0.10, min_confidence=0.50,
+        min_direction_score=0.60, min_direction_margin=0.15, max_spread_points=100.0,
+        max_slippage_points=100.0, no_new_entry_after="23:59",
+    )
+    runtime = NeuralMT5Runtime(s, client=MT5Client(backend), model=BuyModel(), scaler=scaler(), sleep_fn=lambda _: None)
+    runtime.start()
+    first = runtime.run_once()
+    assert first.executed == 1
+    original_tick = backend.symbol_info_tick
+    backend.symbol_info_tick = lambda symbol: SimpleNamespace(time=int(time.time()), bid=9999.0, ask=9999.2)
+    runtime._maintain_positions()
+    import sqlite3
+    with sqlite3.connect(tmp_path / "runtime.db") as conn:
+        row = conn.execute("SELECT closed_at_utc,exit_reason FROM trades ORDER BY opened_at_utc LIMIT 1").fetchone()
+        assert row[0] is not None
+        assert row[1] == "TP"
+    backend.symbol_info_tick = original_tick
+    runtime.stop()
