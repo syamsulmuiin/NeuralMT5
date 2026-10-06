@@ -23,7 +23,7 @@ The system is intentionally designed around **capital preservation, reproducibil
 | Dashboard & API | Implemented |
 | Integrated analysis/paper runtime | Implemented |
 | Software live-readiness controls | Implemented |
-| Automated regression baseline | **126 tests passing** |
+| Automated regression baseline | **134 tests passing** |
 | Real MT5 broker/host validation | **Pending** |
 | LIVE self-certification | **No** |
 
@@ -425,6 +425,8 @@ Remote access requires explicit opt-in, authentication, and trusted HTTPS proxy 
 ```text
 NeuralMT5/
 ├── main.py
+├── train.py
+├── backtest.py
 ├── run_dashboard.py
 ├── .env.example
 ├── requirements.txt
@@ -627,13 +629,35 @@ storage/models/champion.pt.json
 storage/scalers/champion.json
 ```
 
+After promotion, run the historical production-pipeline backtest **before** forward testing:
+
+```powershell
+python backtest.py
+```
+
+Optional overrides:
+
+```powershell
+python backtest.py --bars 8000
+python backtest.py --symbol XAUUSD
+```
+
+The backtest loads the active Champion/scaler, resolves the same broker symbols, fetches closed MT5 history, and replays the production Layer 1 → Layer 2 → Layer 3 path with next-LTF-bar execution. Reports are written to:
+
+```text
+storage/reports/backtest_report.json
+storage/reports/backtest_trades.csv
+```
+
+Review the backtest report before moving to forward testing. The replay applies production planning, Risk Firewall state (including daily risk/loss and consecutive losses), execution preflight (session/cutoff/stops/freeze), next-LTF-bar execution, and conservative same-bar SL/TP resolution. It remains a candle-based historical simulation: exact intrabar path, broker latency/requotes, commissions, swaps, and real partial-fill microstructure are not reconstructed unless present in the implemented historical model. A successful command execution is **not** by itself evidence of a profitable or robust strategy.
+
 Then run forward analysis or paper testing:
 
 ```powershell
 python main.py --run
 ```
 
-Recommended `.env` progression is `TRADING_MODE=analysis` first, then `TRADING_MODE=paper`. LIVE remains gated by real-host readiness and must not be enabled merely because training succeeded. Training and Challenger promotion are blocked while `TRADING_MODE=live`.
+Recommended `.env` progression is `TRADING_MODE=analysis` first, then `TRADING_MODE=paper`. LIVE remains gated by real-host readiness and must not be enabled merely because training or backtesting succeeded. Training, Challenger promotion, and historical backtesting are blocked while `TRADING_MODE=live`.
 
 Training controls are configured in `.env`:
 
@@ -643,6 +667,8 @@ LABEL_HORIZON_BARS=30
 TRAIN_MIN_SAMPLES=300
 TRAIN_MIN_BALANCED_ACCURACY=0.34
 TRAIN_MIN_CLASS_SAMPLES=20
+BACKTEST_HISTORY_BARS=5000
+BACKTEST_INITIAL_EQUITY=10000
 EPOCHS=30
 BATCH_SIZE=64
 LEARNING_RATE=0.001
@@ -650,6 +676,38 @@ RANDOM_SEED=42
 ```
 
 If training reports insufficient samples, run `python train.py --diagnose` first. The diagnostics distinguish unresolved symbols, `symbol_select` failure, missing broker history, insufficient feature history, sequence-alignment failures, and class distribution. Do not bypass the minimum-sample or validation gates with dummy artifacts.
+
+## Canonical command sequence after clone
+
+```text
+Clone / install / configure .env
+        ↓
+python main.py
+        ↓
+python train.py --diagnose
+        ↓
+python train.py
+        ↓
+review training_report.json
+        ↓
+python train.py --promote
+        ↓
+python backtest.py
+        ↓
+TRADING_MODE=analysis → python main.py --run
+        ↓
+TRADING_MODE=paper → python main.py --run
+        ↓
+python tools/real_host_preflight.py
+        ↓
+fault injection + long soak
+        ↓
+human LIVE-readiness review
+        ↓
+LIVE only after every explicit gate is satisfied
+```
+
+Each stage is a gate for the next. Do not replace failed diagnostics, training validation, backtest review, or real-host evidence with dummy artifacts or manually-forced pass flags.
 
 ## Safe configuration validation only
 

@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     train_min_samples: int = Field(300, ge=50)
     train_min_balanced_accuracy: float = Field(0.34, ge=0.0, le=1.0)
     train_min_class_samples: int = Field(20, ge=1)
+    backtest_history_bars: int = Field(5000, ge=500)
+    backtest_initial_equity: float = Field(10000.0, gt=0.0)
     dataset_version: str = "dataset-v1"
     model_artifact_path: str = "storage/models/champion.pt"
     scaler_artifact_path: str = "storage/scalers/champion.json"

@@ -27,7 +27,7 @@ The repository now closes the code-level Critical and H1–H5 blockers identifie
 
 ## Regression evidence
 
-The complete suite contains **126 tests** and passes after blocker closure. `python -m compileall` also passes.
+The complete suite contains **134 tests** and passes after blocker closure. `python -m compileall` also passes.
 
 ## Remaining real-host gate
 
@@ -50,8 +50,6 @@ LIVE_SOAK_TEST_PASSED=false
 
 must remain false until `REAL_HOST_VALIDATION.md` is completed on the target MT5 host.
 
-See `BLOCKER_CLOSURE.md` for the implementation-level closure details.
-
 
 ## Full-code audit hardening update
 
@@ -69,9 +67,13 @@ The post-training-CLI audit closed additional defects that were not exercised by
 - account equity is refreshed each runtime cycle before new risk sizing;
 - model loading verifies feature implementation version and scaler content hash, not version strings alone.
 
-The regression baseline after this audit is **126 tests passing** plus successful `compileall`. Real-host/broker evidence remains separate from software regression.
+The regression baseline after this audit is **134 tests passing** plus successful `compileall`. Real-host/broker evidence remains separate from software regression.
 
 ## Documentation synchronization rule
 
 Repository documentation is treated as part of the software contract. Changes to CLI workflows, configuration, broker/symbol resolution, training/promotion, risk/execution/reconciliation, live-readiness, artifacts, APIs, or dependencies must update the corresponding active documentation and `.env.example` in the same change set. Development-history-only documents should not be reintroduced; Git history is the source of historical change records.
 
+
+## Backtest CLI and canonical workflow synchronization
+
+The production historical replay engine is exposed through the top-level `python backtest.py` CLI. It loads the promoted Champion and paired scaler, resolves the configured broker symbols, fetches closed MT5 history, replays the existing Layer 1/2/3 implementation, applies historical daily/consecutive-loss Risk Firewall state plus execution preflight, and writes JSON plus per-trade CSV evidence. The canonical user workflow is now documented and tested as diagnose → train Challenger → explicit promotion → historical backtest → analysis forward test → paper forward test → real-host preflight/fault injection/soak → human LIVE-readiness review. Backtest completion never bypasses Layer 3 safety or any LIVE-readiness flag.

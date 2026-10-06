@@ -56,6 +56,29 @@ SYMBOL_EXCLUDE_TOKENS=REPLAY,REPALY,PLAYBACK
 
 Manual overrides remain subject to the same safety checks; they cannot force a replay/custom/non-openable symbol. Do not lower the global resolver confidence threshold merely to make an incorrect candidate pass.
 
+## Stage 1 — train, promote, and historical backtest
+
+After Stage 0 diagnostics are clean, train a Challenger and review its validation report:
+
+```powershell
+python train.py
+Get-Content storage\reports\training_report.json
+```
+
+Only when the saved report has `passed: true`, promote that exact Challenger without retraining:
+
+```powershell
+python train.py --promote
+```
+
+Then run the historical production-pipeline backtest:
+
+```powershell
+python backtest.py
+```
+
+Review both `storage/reports/backtest_report.json` and `storage/reports/backtest_trades.csv`. Confirm the intended broker symbol was resolved, history coverage is adequate, trades use next-LTF-bar execution, and Risk Firewall/session preflight behavior is plausible. Remember that candle replay does not reconstruct exact intrabar path, broker latency/requotes, commissions, swaps, or live partial-fill microstructure. Backtest success is not a LIVE-readiness attestation and must not set any LIVE gate.
+
 ## Stage A — read-only host preflight
 
 Run:

@@ -17,6 +17,8 @@ from layer2_brain.inference import infer
 from layer2_brain.opportunity import evaluate_neural_opportunity
 from layer3_execution.models import MarketQuote, RiskState
 from layer3_execution.risk import risk_firewall
+from layer3_execution.preflight import execution_preflight
+from config.timezones import resolve_timezone
 from layer3_execution.trade_planner import plan_trade
 from .evaluator import metrics_from_r
 
@@ -88,6 +90,12 @@ def run_historical_pipeline(
     minimum = max(settings.ltf_window + warmup, 2)
     equity = float(initial_equity)
     trades: list[BacktestTrade] = []
+    session_tz = resolve_timezone(settings.trading_timezone)
+    risk_day = None
+    day_start_equity = equity
+    daily_realized_loss_amount = 0.0
+    daily_committed_risk = 0.0
+    consecutive_losses = 0
 
     for i in range(minimum - 1, len(ltf_all) - 1):
         decision_time = ltf_all[i].time_utc + timeframe_delta(settings.ltf)
@@ -131,12 +139,28 @@ def run_historical_pipeline(
                               now_utc=entry_bar.time_utc)
         except ValueError:
             continue
+        local_day = entry_bar.time_utc.astimezone(session_tz).date()
+        if risk_day != local_day:
+            risk_day = local_day
+            day_start_equity = max(equity, 1e-9)
+            daily_realized_loss_amount = 0.0
+            daily_committed_risk = 0.0
+            consecutive_losses = 0
         risk = risk_firewall(plan=plan, quote=quote, state=RiskState(
-            equity=equity, daily_realized_loss_fraction=0.0, daily_committed_risk_fraction=0.0,
-            consecutive_losses=0, open_positions=0, total_exposure_fraction=0.0, correlated_exposure_fraction=0.0,
+            equity=equity,
+            daily_realized_loss_fraction=min(1.0, daily_realized_loss_amount / max(day_start_equity, 1e-9)),
+            daily_committed_risk_fraction=min(1.0, daily_committed_risk),
+            consecutive_losses=consecutive_losses, open_positions=0,
+            total_exposure_fraction=0.0, correlated_exposure_fraction=0.0,
         ), settings=settings)
         if not risk.allowed:
             continue
+        preflight = execution_preflight(
+            plan=plan, refreshed_quote=quote, spec=spec, settings=settings, now_utc=entry_bar.time_utc
+        )
+        if not preflight.allowed:
+            continue
+        daily_committed_risk = min(1.0, daily_committed_risk + plan.risk_fraction)
 
         exit_price = None; exit_time = None; reason = None
         for j, bar in enumerate(ltf_all[i + 1:], start=i + 1):
@@ -164,6 +188,11 @@ def run_historical_pipeline(
         pnl = (signed / spec.tick_size) * spec.tick_value * plan.lot
         realized_r = pnl / plan.estimated_loss_at_sl if plan.estimated_loss_at_sl > 0 else 0.0
         equity += pnl
+        if pnl < 0:
+            daily_realized_loss_amount += abs(pnl)
+            consecutive_losses += 1
+        elif pnl > 0:
+            consecutive_losses = 0
         trades.append(BacktestTrade(decision_time, entry_bar.time_utc, exit_time, opportunity.direction,
                                     plan.entry, plan.stop_loss, plan.take_profit, float(exit_price), str(reason), realized_r))
 
