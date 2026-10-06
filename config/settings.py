@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     train_min_samples: int = Field(300, ge=50)
     train_min_balanced_accuracy: float = Field(0.34, ge=0.0, le=1.0)
     train_min_class_samples: int = Field(20, ge=1)
+    train_class_weight_power: float = Field(0.50, ge=0.0, le=1.0)
+    train_classification_loss_weight: float = Field(1.00, gt=0.0)
+    train_quality_loss_weight: float = Field(0.25, ge=0.0)
+    train_excursion_loss_weight: float = Field(0.25, ge=0.0)
     backtest_history_bars: int = Field(5000, ge=500)
     backtest_initial_equity: float = Field(10000.0, gt=0.0)
     dataset_version: str = "dataset-v1"

@@ -65,3 +65,23 @@ def test_build_samples_from_mt5_shaped_history_is_nonzero():
     assert len(samples) >= 50
     assert diagnostics['symbols']['XAUUSD']['history_counts']['M1'] == 500
     assert diagnostics['symbols']['XAUUSD']['status'] == 'OK'
+
+
+def test_compute_class_weights_upweights_minority_class():
+    from training_pipeline import compute_class_weights
+    samples=[_seq_sample(0,i) for i in range(8)] + [_seq_sample(1,20+i) for i in range(8)] + [_seq_sample(2,40+i) for i in range(2)]
+    w=compute_class_weights(samples,0.5)
+    assert w.shape == (3,)
+    assert float(w[2]) > float(w[0])
+    assert abs(float(w.mean())-1.0) < 1e-6
+
+
+def test_evaluate_reports_confusion_and_prediction_counts():
+    samples=[_seq_sample(i%3,i) for i in range(12)]
+    scaler=fit_scaler(samples)
+    model=MultiTimeframeBrain(1,8,0)
+    metrics=evaluate(model,samples,scaler,4)
+    assert set(metrics['predicted_class_counts']) == {'BUY','SELL','HOLD'}
+    assert sum(metrics['predicted_class_counts'].values()) == len(samples)
+    assert set(metrics['confusion_matrix']) == {'BUY','SELL','HOLD'}
+    assert sum(sum(row.values()) for row in metrics['confusion_matrix'].values()) == len(samples)

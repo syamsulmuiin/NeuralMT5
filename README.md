@@ -667,6 +667,10 @@ LABEL_HORIZON_BARS=30
 TRAIN_MIN_SAMPLES=300
 TRAIN_MIN_BALANCED_ACCURACY=0.34
 TRAIN_MIN_CLASS_SAMPLES=20
+TRAIN_CLASS_WEIGHT_POWER=0.50
+TRAIN_CLASSIFICATION_LOSS_WEIGHT=1.00
+TRAIN_QUALITY_LOSS_WEIGHT=0.25
+TRAIN_EXCURSION_LOSS_WEIGHT=0.25
 BACKTEST_HISTORY_BARS=5000
 BACKTEST_INITIAL_EQUITY=10000
 EPOCHS=30
@@ -676,6 +680,9 @@ RANDOM_SEED=42
 ```
 
 If training reports insufficient samples, run `python train.py --diagnose` first. The diagnostics distinguish unresolved symbols, `symbol_select` failure, missing broker history, insufficient feature history, sequence-alignment failures, and class distribution. Do not bypass the minimum-sample or validation gates with dummy artifacts.
+
+If Challenger validation fails, `python train.py --promote` remains blocked by design. Training uses class-balanced classification weights computed from the **training split only**, with classification kept as the dominant multitask objective. `training_report.json` includes train class counts, applied class weights, predicted-class counts, and a confusion matrix so failures such as a collapsed HOLD class can be diagnosed directly. Do not lower `TRAIN_MIN_BALANCED_ACCURACY` merely to force promotion; retrain only after addressing the reported failure.
+
 
 ## Canonical command sequence after clone
 

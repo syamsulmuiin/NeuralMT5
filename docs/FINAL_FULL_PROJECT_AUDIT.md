@@ -77,3 +77,7 @@ Repository documentation is treated as part of the software contract. Changes to
 ## Backtest CLI and canonical workflow synchronization
 
 The production historical replay engine is exposed through the top-level `python backtest.py` CLI. It loads the promoted Champion and paired scaler, resolves the configured broker symbols, fetches closed MT5 history, replays the existing Layer 1/2/3 implementation, applies historical daily/consecutive-loss Risk Firewall state plus execution preflight, and writes JSON plus per-trade CSV evidence. The canonical user workflow is now documented and tested as diagnose → train Challenger → explicit promotion → historical backtest → analysis forward test → paper forward test → real-host preflight/fault injection/soak → human LIVE-readiness review. Backtest completion never bypasses Layer 3 safety or any LIVE-readiness flag.
+
+## Challenger classification validation
+
+Training applies deterministic class-balanced classification weights derived from the training split only and keeps the classification objective dominant over auxiliary quality/excursion heads. The training report records class weights, predicted-class counts, per-class recall, and a confusion matrix. A failed validation keeps `python train.py --promote` blocked; the gate must not be bypassed by editing reports or lowering thresholds solely to obtain a pass.

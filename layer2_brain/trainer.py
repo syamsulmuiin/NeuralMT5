@@ -8,19 +8,48 @@ class TrainingBatch:
     htf: torch.Tensor; mtf: torch.Tensor; ltf: torch.Tensor
     direction: torch.Tensor; quality: torch.Tensor; excursion: torch.Tensor
 
-def multitask_loss(outputs:dict, direction_target, quality_target, excursion_target):
+def multitask_loss(
+    outputs:dict,
+    direction_target,
+    quality_target,
+    excursion_target,
+    *,
+    class_weights: torch.Tensor | None = None,
+    classification_weight: float = 1.0,
+    quality_weight: float = 0.25,
+    excursion_weight: float = 0.25,
+):
     eps=1e-8
-    cls=nn.functional.nll_loss(torch.log(outputs['probabilities'].clamp_min(eps)),direction_target)
+    cls=nn.functional.nll_loss(
+        torch.log(outputs['probabilities'].clamp_min(eps)),
+        direction_target,
+        weight=class_weights,
+    )
     quality=nn.functional.mse_loss(outputs['quality'],quality_target)
     excursion=nn.functional.smooth_l1_loss(outputs['excursion'],excursion_target)
-    return cls + quality + excursion
+    return classification_weight*cls + quality_weight*quality + excursion_weight*excursion
 
-def train_epoch(model, batches:list[TrainingBatch], optimizer)->float:
+def train_epoch(
+    model,
+    batches:list[TrainingBatch],
+    optimizer,
+    *,
+    class_weights: torch.Tensor | None = None,
+    classification_weight: float = 1.0,
+    quality_weight: float = 0.25,
+    excursion_weight: float = 0.25,
+)->float:
     if not batches: raise ValueError('training batches cannot be empty')
     model.train(); total=0.0
     for b in batches:
         optimizer.zero_grad(set_to_none=True); out=model(b.htf,b.mtf,b.ltf)
-        loss=multitask_loss(out,b.direction,b.quality,b.excursion)
+        loss=multitask_loss(
+            out,b.direction,b.quality,b.excursion,
+            class_weights=class_weights,
+            classification_weight=classification_weight,
+            quality_weight=quality_weight,
+            excursion_weight=excursion_weight,
+        )
         if not torch.isfinite(loss): raise FloatingPointError('non-finite training loss')
         loss.backward(); optimizer.step(); total+=float(loss.detach())
     return total/len(batches)

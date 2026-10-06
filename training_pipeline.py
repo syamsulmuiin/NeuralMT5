@@ -252,6 +252,25 @@ def _tensor(sample: TrainingSample, scaler: StandardScalerArtifact, attr: str) -
     return torch.from_numpy(scaler.transform(x, scaler.feature_names))
 
 
+
+
+def compute_class_weights(samples: list[TrainingSample], power: float = 0.5) -> torch.Tensor:
+    """Return deterministic class weights from the TRAIN split only.
+
+    power=0 disables reweighting, 0.5 uses square-root inverse frequency,
+    and 1.0 uses full inverse frequency. Weights are normalized to mean 1.
+    """
+    counts = np.asarray([sum(s.direction == i for s in samples) for i in range(3)], dtype=np.float64)
+    if np.any(counts <= 0):
+        raise TrainingDataError(f"training split missing class coverage: BUY={int(counts[0])} SELL={int(counts[1])} HOLD={int(counts[2])}")
+    if power <= 0:
+        weights = np.ones(3, dtype=np.float64)
+    else:
+        inv = counts.sum() / (len(counts) * counts)
+        weights = np.power(inv, power)
+        weights /= weights.mean()
+    return torch.tensor(weights, dtype=torch.float32)
+
 def batches(samples: list[TrainingSample], scaler: StandardScalerArtifact, batch_size: int, shuffle: bool, seed: int) -> list[TrainingBatch]:
     idx = np.arange(len(samples))
     if shuffle:
@@ -274,6 +293,8 @@ def evaluate(model, samples: list[TrainingSample], scaler: StandardScalerArtifac
     model.eval()
     correct = [0, 0, 0]
     total = [0, 0, 0]
+    predicted = [0, 0, 0]
+    confusion = [[0, 0, 0] for _ in range(3)]
     losses = []
     with torch.inference_mode():
         for b in batches(samples, scaler, batch_size, False, 0):
@@ -281,17 +302,22 @@ def evaluate(model, samples: list[TrainingSample], scaler: StandardScalerArtifac
             pred = o["probabilities"].argmax(dim=1)
             for y, p in zip(b.direction.tolist(), pred.tolist()):
                 total[y] += 1
+                predicted[p] += 1
+                confusion[y][p] += 1
                 correct[y] += int(y == p)
             eps = 1e-8
             loss = torch.nn.functional.nll_loss(torch.log(o["probabilities"].clamp_min(eps)), b.direction)
             losses.append(float(loss))
     recalls = [correct[i] / total[i] if total[i] else 0.0 for i in range(3)]
+    names = ["BUY", "SELL", "HOLD"]
     return {
         "samples": len(samples),
         "classification_loss": sum(losses) / len(losses) if losses else math.inf,
         "balanced_accuracy": sum(recalls) / 3.0,
-        "per_class_recall": {"BUY": recalls[0], "SELL": recalls[1], "HOLD": recalls[2]},
-        "class_counts": {"BUY": total[0], "SELL": total[1], "HOLD": total[2]},
+        "per_class_recall": dict(zip(names, recalls)),
+        "class_counts": dict(zip(names, total)),
+        "predicted_class_counts": dict(zip(names, predicted)),
+        "confusion_matrix": {names[i]: dict(zip(names, confusion[i])) for i in range(3)},
     }
 
 
@@ -351,12 +377,19 @@ def run_training(settings: Settings) -> dict:
         raise TrainingDataError(f"chronological split produced an empty partition: train={len(train)} val={len(val)} test={len(test)}")
 
     scaler = fit_scaler(train)
+    class_weights = compute_class_weights(train, settings.train_class_weight_power)
     model = MultiTimeframeBrain(len(scaler.feature_names), settings.hidden_size, settings.dropout)
     opt = torch.optim.Adam(model.parameters(), lr=settings.learning_rate)
     history = []
     for epoch in range(settings.epochs):
         train_batches = batches(train, scaler, settings.batch_size, True, settings.random_seed + epoch)
-        history.append(train_epoch(model, train_batches, opt))
+        history.append(train_epoch(
+            model, train_batches, opt,
+            class_weights=class_weights,
+            classification_weight=settings.train_classification_loss_weight,
+            quality_weight=settings.train_quality_loss_weight,
+            excursion_weight=settings.train_excursion_loss_weight,
+        ))
         print(f"epoch {epoch + 1}/{settings.epochs} loss={history[-1]:.6f}")
 
     val_metrics = evaluate(model, val, scaler, settings.batch_size)
@@ -398,6 +431,21 @@ def run_training(settings: Settings) -> dict:
         "dataset_hash": dataset_digest(samples),
         "feature_version": FEATURE_VERSION,
         "train_samples": len(train),
+        "train_class_counts": {
+            "BUY": sum(s.direction == 0 for s in train),
+            "SELL": sum(s.direction == 1 for s in train),
+            "HOLD": sum(s.direction == 2 for s in train),
+        },
+        "class_weights": {
+            "BUY": float(class_weights[0]),
+            "SELL": float(class_weights[1]),
+            "HOLD": float(class_weights[2]),
+        },
+        "loss_weights": {
+            "classification": settings.train_classification_loss_weight,
+            "quality": settings.train_quality_loss_weight,
+            "excursion": settings.train_excursion_loss_weight,
+        },
         "val": val_metrics,
         "test": test_metrics,
         "loss_history": history,
@@ -416,7 +464,15 @@ def promote_existing(settings: Settings) -> dict:
         raise FileNotFoundError("challenger/report not found; run python train.py first")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if not report.get("passed"):
-        raise RuntimeError("promotion blocked: challenger validation did not pass")
+        blockers = report.get("promotion_blockers") or ["challenger validation did not pass"]
+        val = report.get("val") or {}
+        detail = "; ".join(str(x) for x in blockers)
+        if "balanced_accuracy" in val:
+            detail += f"; validation balanced_accuracy={val['balanced_accuracy']:.6f} required>={settings.train_min_balanced_accuracy:.6f}"
+        recalls = val.get("per_class_recall")
+        if recalls:
+            detail += "; recall=" + ",".join(f"{k}:{float(v):.4f}" for k, v in recalls.items())
+        raise RuntimeError(f"promotion blocked: {detail}. Retrain a new Challenger; do not bypass the validation gate.")
     meta_path = Path(str(model) + ".json")
     if not meta_path.exists():
         raise FileNotFoundError(f"challenger metadata not found: {meta_path}")

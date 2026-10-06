@@ -164,3 +164,7 @@ LIVE_SOAK_TEST_PASSED=true
 ```
 
 Then separately acknowledge readiness and enable live execution. Do not combine these changes with code changes or model promotion.
+
+## Challenger classification validation
+
+Training applies deterministic class-balanced classification weights derived from the training split only and keeps the classification objective dominant over auxiliary quality/excursion heads. The training report records class weights, predicted-class counts, per-class recall, and a confusion matrix. A failed validation keeps `python train.py --promote` blocked; the gate must not be bypassed by editing reports or lowering thresholds solely to obtain a pass.
