@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NeuralMT5 Dashboard</title><link rel="stylesheet" href="/assets/styles.css"></head>
+<body><header><div><strong>NeuralMT5</strong><span>Phase 5 Dashboard</span></div><div id="connection">Connecting…</div></header>
+<nav id="tabs"><button data-view="overview">Overview</button><button data-view="market">Market</button><button data-view="opportunities">Opportunities</button><button data-view="trades">Trades & Replay</button><button data-view="learning">Learning</button><button data-view="system">System</button></nav>
+<main>
+<section class="hero"><div><p class="eyebrow">RUNTIME</p><h1 id="mode">—</h1><p id="gate">Loading safety state…</p></div><div class="controls"><button data-command="PAUSE_NEW_ENTRY">Pause entries</button><button data-command="RESUME_NEW_ENTRY">Resume entries</button><button class="danger" data-command="EMERGENCY_STOP_NEW_ENTRY">Emergency stop</button></div></section>
+<section data-page="overview"><div class="grid metrics" id="metrics"></div><div class="grid panels"><article><h2>Neural Brain</h2><div id="brain" class="list"></div></article><article><h2>Risk Firewall</h2><div id="risk" class="list"></div></article><article><h2>Open Positions</h2><div id="positions" class="list"></div></article><article><h2>Learning</h2><div id="learningSummary" class="list"></div></article></div><section class="panel"><h2>Live Events</h2><div id="events" class="events"></div></section></section>
+<section data-page="market" hidden><div class="panel"><h2>Market Intelligence</h2><div id="marketTable" class="tablewrap"></div></div></section>
+<section data-page="opportunities" hidden><div class="panel"><h2>Opportunities & Risk Decisions</h2><div id="opportunityTable" class="tablewrap"></div></div></section>
+<section data-page="trades" hidden><div class="grid panels"><article><h2>Trade History</h2><div id="tradeTable" class="tablewrap"></div></article><article><h2>Trade Replay</h2><div id="replay" class="replay">Select a trade.</div></article></div></section>
+<section data-page="learning" hidden><div class="panel"><h2>Champion / Challenger</h2><div id="learningTable" class="tablewrap"></div></div></section>
+<section data-page="system" hidden><div class="grid panels"><article><h2>System Health</h2><div id="systemInfo" class="list"></div></article><article><h2>Configuration (masked)</h2><div id="configInfo" class="events"></div></article></div></section>
+</main><script src="/assets/app.js"></script></body></html>
