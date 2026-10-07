@@ -21,7 +21,7 @@ from layer1_market.sequences import synchronize_sequences
 from layer1_market.symbol_resolver import inspect_symbol_candidates, resolve_symbol
 from layer1_market.timeframes import timeframe_delta
 from layer2_brain.artifacts import save_model_artifact
-from layer2_brain.network import MultiTimeframeBrain, set_deterministic
+from layer2_brain.network import NETWORK_VERSION, MultiTimeframeBrain, set_deterministic
 from layer2_brain.scaler import StandardScalerArtifact
 from layer2_brain.trainer import TrainingBatch, train_epoch
 
@@ -109,6 +109,29 @@ def _diagnostics_path() -> Path:
     return p
 
 
+def _time_range(items, *, attr: str) -> dict:
+    if not items:
+        return {"start_utc": None, "end_utc": None, "duration_seconds": 0}
+    values = [getattr(item, attr) for item in items]
+    start, end = min(values), max(values)
+    return {
+        "start_utc": start.isoformat(),
+        "end_utc": end.isoformat(),
+        "duration_seconds": max(0.0, (end - start).total_seconds()),
+    }
+
+
+def _split_range(samples: list[TrainingSample]) -> dict:
+    if not samples:
+        return {"samples": 0, "decision_start_utc": None, "decision_end_utc": None, "label_end_utc": None}
+    return {
+        "samples": len(samples),
+        "decision_start_utc": min(s.timestamp for s in samples).isoformat(),
+        "decision_end_utc": max(s.timestamp for s in samples).isoformat(),
+        "label_end_utc": max(s.label_end_time for s in samples).isoformat(),
+    }
+
+
 def build_samples(settings: Settings, client: MT5Client, *, diagnostics: dict | None = None) -> list[TrainingSample]:
     specs = discover_symbols(client)
     samples: list[TrainingSample] = []
@@ -156,6 +179,11 @@ def build_samples(settings: Settings, client: MT5Client, *, diagnostics: dict | 
             continue
 
         sd["history_counts"] = {settings.htf: len(htf_c), settings.mtf: len(mtf_c), settings.ltf: len(ltf_c)}
+        sd["history_ranges"] = {
+            settings.htf: _time_range(htf_c, attr="time_utc"),
+            settings.mtf: _time_range(mtf_c, attr="time_utc"),
+            settings.ltf: _time_range(ltf_c, attr="time_utc"),
+        }
         minimums = {tf: _minimum_history(settings, tf) for tf in (settings.htf, settings.mtf, settings.ltf)}
         sd["minimum_history"] = minimums
         shortages = {tf: f"{sd['history_counts'][tf]} < {minimums[tf]}" for tf in minimums if sd["history_counts"][tf] < minimums[tf]}
@@ -201,6 +229,8 @@ def build_samples(settings: Settings, client: MT5Client, *, diagnostics: dict | 
 
         sd["candidate_rows"] = candidate_rows
         sd["sequence_failures"] = sync_failures
+        symbol_samples = [sample for sample in samples if sample.symbol == canonical]
+        sd["sample_range"] = _split_range(symbol_samples)
         sd["status"] = "OK" if sd["samples"] else "NO_SAMPLES"
 
     samples.sort(key=lambda x: (x.timestamp, x.symbol))
@@ -254,15 +284,49 @@ def _tensor(sample: TrainingSample, scaler: StandardScalerArtifact, attr: str) -
 
 
 
-def compute_class_weights(samples: list[TrainingSample], power: float = 0.5) -> torch.Tensor:
-    """Return deterministic class weights from the TRAIN split only.
+def compute_hierarchical_weights(samples: list[TrainingSample], power: float = 0.5) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return TRAIN-only balancing weights for TRADE/HOLD and BUY/SELL.
 
-    power=0 disables reweighting, 0.5 uses square-root inverse frequency,
-    and 1.0 uses full inverse frequency. Weights are normalized to mean 1.
+    The actionability head is binary (TRADE vs HOLD). ``trade_pos_weight`` is
+    the BCE positive-class weight for TRADE. The direction head is trained only
+    on BUY/SELL samples and receives normalized BUY/SELL weights. ``power``
+    tempers inverse-frequency correction: 0 disables it, 0.5 uses square-root
+    correction, and 1.0 uses full inverse-frequency correction for BUY/SELL.
+    The TRADE/HOLD gate is always fully balanced because those are aggregate
+    binary classes.
     """
     counts = np.asarray([sum(s.direction == i for s in samples) for i in range(3)], dtype=np.float64)
     if np.any(counts <= 0):
-        raise TrainingDataError(f"training split missing class coverage: BUY={int(counts[0])} SELL={int(counts[1])} HOLD={int(counts[2])}")
+        raise TrainingDataError(
+            f"training split missing class coverage: BUY={int(counts[0])} SELL={int(counts[1])} HOLD={int(counts[2])}"
+        )
+    buy, sell, hold = counts.tolist()
+    trade = buy + sell
+    # BCE pos_weight applies to TRADE=1. Fully balance TRADE/HOLD aggregate
+    # contribution so the gate is not biased by BUY+SELL being the majority.
+    trade_pos_weight = hold / trade
+    if power <= 0:
+        direction_weights = np.ones(2, dtype=np.float64)
+    else:
+        inv = np.asarray([trade / (2.0 * buy), trade / (2.0 * sell)], dtype=np.float64)
+        direction_weights = np.power(inv, power)
+        direction_weights /= direction_weights.mean()
+    return (
+        torch.tensor(float(trade_pos_weight), dtype=torch.float32),
+        torch.tensor(direction_weights, dtype=torch.float32),
+    )
+
+
+def compute_class_weights(samples: list[TrainingSample], power: float = 0.5) -> torch.Tensor:
+    """Compatibility diagnostic: normalized flat BUY/SELL/HOLD weights.
+
+    Kept for reports/tests while training itself uses hierarchical weights.
+    """
+    counts = np.asarray([sum(s.direction == i for s in samples) for i in range(3)], dtype=np.float64)
+    if np.any(counts <= 0):
+        raise TrainingDataError(
+            f"training split missing class coverage: BUY={int(counts[0])} SELL={int(counts[1])} HOLD={int(counts[2])}"
+        )
     if power <= 0:
         weights = np.ones(3, dtype=np.float64)
     else:
@@ -309,12 +373,23 @@ def evaluate(model, samples: list[TrainingSample], scaler: StandardScalerArtifac
             loss = torch.nn.functional.nll_loss(torch.log(o["probabilities"].clamp_min(eps)), b.direction)
             losses.append(float(loss))
     recalls = [correct[i] / total[i] if total[i] else 0.0 for i in range(3)]
+    precisions = [correct[i] / predicted[i] if predicted[i] else 0.0 for i in range(3)]
+    f1 = [
+        2.0 * precisions[i] * recalls[i] / (precisions[i] + recalls[i])
+        if precisions[i] + recalls[i] > 0 else 0.0
+        for i in range(3)
+    ]
     names = ["BUY", "SELL", "HOLD"]
+    predicted_classes = sum(v > 0 for v in predicted)
     return {
         "samples": len(samples),
         "classification_loss": sum(losses) / len(losses) if losses else math.inf,
         "balanced_accuracy": sum(recalls) / 3.0,
+        "macro_f1": sum(f1) / 3.0,
+        "predicted_class_coverage": predicted_classes,
         "per_class_recall": dict(zip(names, recalls)),
+        "per_class_precision": dict(zip(names, precisions)),
+        "per_class_f1": dict(zip(names, f1)),
         "class_counts": dict(zip(names, total)),
         "predicted_class_counts": dict(zip(names, predicted)),
         "confusion_matrix": {names[i]: dict(zip(names, confusion[i])) for i in range(3)},
@@ -329,7 +404,11 @@ def dataset_digest(samples: list[TrainingSample]) -> str:
 
 
 def _write_diagnostics(diag: dict) -> None:
-    _diagnostics_path().write_text(json.dumps(diag, indent=2, default=str), encoding="utf-8")
+    path = _diagnostics_path()
+    try:
+        path.write_text(json.dumps(diag, indent=2, default=str), encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to write training diagnostics {path}: {exc}") from exc
 
 
 
@@ -344,8 +423,19 @@ def run_diagnostics(settings: Settings) -> dict:
     try:
         build_samples(settings, client, diagnostics=diagnostics)
     finally:
-        client.shutdown()
-        _write_diagnostics(diagnostics)
+        shutdown_error = None
+        try:
+            client.shutdown()
+        except Exception as exc:
+            shutdown_error = exc
+        try:
+            _write_diagnostics(diagnostics)
+        except Exception:
+            if shutdown_error is not None:
+                raise RuntimeError(f"MT5 shutdown also failed: {shutdown_error}") from shutdown_error
+            raise
+        if shutdown_error is not None:
+            raise RuntimeError(f"MT5 shutdown failed after diagnostics: {shutdown_error}") from shutdown_error
     return diagnostics
 
 
@@ -362,8 +452,19 @@ def run_training(settings: Settings) -> dict:
     try:
         samples = build_samples(settings, client, diagnostics=diagnostics)
     finally:
-        client.shutdown()
-        _write_diagnostics(diagnostics)
+        shutdown_error = None
+        try:
+            client.shutdown()
+        except Exception as exc:
+            shutdown_error = exc
+        try:
+            _write_diagnostics(diagnostics)
+        except Exception:
+            if shutdown_error is not None:
+                raise RuntimeError(f"MT5 shutdown also failed: {shutdown_error}") from shutdown_error
+            raise
+        if shutdown_error is not None:
+            raise RuntimeError(f"MT5 shutdown failed after training data collection: {shutdown_error}") from shutdown_error
 
     if len(samples) < settings.train_min_samples:
         statuses = ", ".join(f"{k}:{v.get('status')} samples={v.get('samples', 0)} history={v.get('history_counts', {})}" for k, v in diagnostics.get("symbols", {}).items())
@@ -378,19 +479,85 @@ def run_training(settings: Settings) -> dict:
 
     scaler = fit_scaler(train)
     class_weights = compute_class_weights(train, settings.train_class_weight_power)
+    trade_pos_weight, direction_weights = compute_hierarchical_weights(train, settings.train_class_weight_power)
     model = MultiTimeframeBrain(len(scaler.feature_names), settings.hidden_size, settings.dropout)
     opt = torch.optim.Adam(model.parameters(), lr=settings.learning_rate)
     history = []
+    validation_history = []
+    best_state = None
+    best_epoch = 0
+    best_val_macro_f1 = -math.inf
+    best_val_balanced_accuracy = -math.inf
+    best_val_loss = math.inf
+    epochs_without_improvement = 0
+    stopped_early = False
+
     for epoch in range(settings.epochs):
         train_batches = batches(train, scaler, settings.batch_size, True, settings.random_seed + epoch)
-        history.append(train_epoch(
+        train_loss = train_epoch(
             model, train_batches, opt,
-            class_weights=class_weights,
+            trade_pos_weight=trade_pos_weight,
+            direction_weights=direction_weights,
             classification_weight=settings.train_classification_loss_weight,
             quality_weight=settings.train_quality_loss_weight,
             excursion_weight=settings.train_excursion_loss_weight,
-        ))
-        print(f"epoch {epoch + 1}/{settings.epochs} loss={history[-1]:.6f}")
+        )
+        history.append(train_loss)
+        epoch_val = evaluate(model, val, scaler, settings.batch_size)
+        validation_history.append({
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "balanced_accuracy": epoch_val["balanced_accuracy"],
+            "macro_f1": epoch_val["macro_f1"],
+            "predicted_class_coverage": epoch_val["predicted_class_coverage"],
+            "classification_loss": epoch_val["classification_loss"],
+            "per_class_recall": epoch_val["per_class_recall"],
+            "predicted_class_counts": epoch_val["predicted_class_counts"],
+        })
+
+        # Macro-F1 is the primary checkpoint metric because it penalizes a
+        # collapsed single-class predictor that can still report balanced
+        # accuracy=1/3. Balanced accuracy and loss are deterministic tie-breaks.
+        f1_gain = epoch_val["macro_f1"] - best_val_macro_f1
+        f1_tie = abs(f1_gain) <= settings.train_early_stopping_min_delta
+        balanced_gain = epoch_val["balanced_accuracy"] - best_val_balanced_accuracy
+        tie_or_better = f1_tie and (
+            balanced_gain > settings.train_early_stopping_min_delta
+            or (abs(balanced_gain) <= settings.train_early_stopping_min_delta
+                and epoch_val["classification_loss"] < best_val_loss)
+        )
+        improved = f1_gain > settings.train_early_stopping_min_delta or tie_or_better
+        if improved or best_state is None:
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch + 1
+            best_val_macro_f1 = epoch_val["macro_f1"]
+            best_val_balanced_accuracy = epoch_val["balanced_accuracy"]
+            best_val_loss = epoch_val["classification_loss"]
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        print(
+            f"epoch {epoch + 1}/{settings.epochs} "
+            f"loss={train_loss:.6f} "
+            f"val_bal_acc={epoch_val['balanced_accuracy']:.6f} "
+            f"val_macro_f1={epoch_val['macro_f1']:.6f} "
+            f"val_loss={epoch_val['classification_loss']:.6f}"
+        )
+
+        if epochs_without_improvement >= settings.train_early_stopping_patience:
+            stopped_early = True
+            print(
+                f"early stopping at epoch {epoch + 1}; "
+                f"restoring best epoch {best_epoch} "
+                f"val_macro_f1={best_val_macro_f1:.6f} "
+                f"val_bal_acc={best_val_balanced_accuracy:.6f}"
+            )
+            break
+
+    if best_state is None:
+        raise RuntimeError("training did not produce a model checkpoint")
+    model.load_state_dict(best_state)
 
     val_metrics = evaluate(model, val, scaler, settings.batch_size)
     test_metrics = evaluate(model, test, scaler, settings.batch_size)
@@ -416,7 +583,7 @@ def run_training(settings: Settings) -> dict:
         c_model,
         feature_names=scaler.feature_names,
         feature_version=FEATURE_VERSION,
-        network_version="cnn-gru-v1",
+        network_version=NETWORK_VERSION,
         scaler_version=scaler.version,
         scaler_hash=scaler_hash,
         random_seed=settings.random_seed,
@@ -430,6 +597,12 @@ def run_training(settings: Settings) -> dict:
         "promoted": False,
         "dataset_hash": dataset_digest(samples),
         "feature_version": FEATURE_VERSION,
+        "dataset_time_range": _split_range(samples),
+        "split_time_ranges": {
+            "train": _split_range(train),
+            "validation": _split_range(val),
+            "test": _split_range(test),
+        },
         "train_samples": len(train),
         "train_class_counts": {
             "BUY": sum(s.direction == 0 for s in train),
@@ -441,6 +614,11 @@ def run_training(settings: Settings) -> dict:
             "SELL": float(class_weights[1]),
             "HOLD": float(class_weights[2]),
         },
+        "hierarchical_weights": {
+            "trade_pos_weight": float(trade_pos_weight),
+            "direction_buy": float(direction_weights[0]),
+            "direction_sell": float(direction_weights[1]),
+        },
         "loss_weights": {
             "classification": settings.train_classification_loss_weight,
             "quality": settings.train_quality_loss_weight,
@@ -449,10 +627,23 @@ def run_training(settings: Settings) -> dict:
         "val": val_metrics,
         "test": test_metrics,
         "loss_history": history,
+        "validation_history": validation_history,
+        "best_epoch": best_epoch,
+        "epochs_completed": len(history),
+        "stopped_early": stopped_early,
+        "early_stopping": {
+            "patience": settings.train_early_stopping_patience,
+            "min_delta": settings.train_early_stopping_min_delta,
+            "selection_metric": "validation macro_f1; balanced_accuracy then classification_loss tie-break",
+        },
         "weights_hash": meta["weights_hash"],
         "scaler_hash": scaler_hash,
     }
-    (report_dir / "training_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report_path = report_dir / "training_report.json"
+    try:
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to write training report {report_path}: {exc}") from exc
     return report
 
 
@@ -462,7 +653,10 @@ def promote_existing(settings: Settings) -> dict:
     scaler = Path("storage/scalers/challenger.json")
     if not report_path.exists() or not model.exists() or not scaler.exists():
         raise FileNotFoundError("challenger/report not found; run python train.py first")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read training report {report_path}: {exc}") from exc
     if not report.get("passed"):
         blockers = report.get("promotion_blockers") or ["challenger validation did not pass"]
         val = report.get("val") or {}
@@ -476,19 +670,28 @@ def promote_existing(settings: Settings) -> dict:
     meta_path = Path(str(model) + ".json")
     if not meta_path.exists():
         raise FileNotFoundError(f"challenger metadata not found: {meta_path}")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read Challenger metadata {meta_path}: {exc}") from exc
     if meta.get("weights_hash") != report.get("weights_hash"):
         raise RuntimeError("promotion blocked: challenger weights hash/report mismatch")
-    scaler_hash = hashlib.sha256(scaler.read_bytes()).hexdigest()
+    try:
+        scaler_hash = hashlib.sha256(scaler.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read Challenger scaler {scaler}: {exc}") from exc
     if scaler_hash != report.get("scaler_hash") or meta.get("scaler_hash") != scaler_hash:
         raise RuntimeError("promotion blocked: challenger scaler hash/report mismatch")
     target_model = Path(settings.model_artifact_path)
     target_scaler = Path(settings.scaler_artifact_path)
-    target_model.parent.mkdir(parents=True, exist_ok=True)
-    target_scaler.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(model, target_model)
-    shutil.copy2(meta_path, Path(str(target_model) + ".json"))
-    shutil.copy2(scaler, target_scaler)
-    report["promoted"] = True
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    try:
+        target_model.parent.mkdir(parents=True, exist_ok=True)
+        target_scaler.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(model, target_model)
+        shutil.copy2(meta_path, Path(str(target_model) + ".json"))
+        shutil.copy2(scaler, target_scaler)
+        report["promoted"] = True
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"promotion artifact installation failed: {exc}") from exc
     return report

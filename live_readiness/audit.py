@@ -37,8 +37,11 @@ def audit_artifacts(settings: Settings) -> tuple[ReadinessCheck, ...]:
     )
 
 def audit_terminal(settings: Settings, backend: Any) -> tuple[ReadinessCheck, ...]:
-    terminal = backend.terminal_info()
-    account = backend.account_info()
+    try:
+        terminal = backend.terminal_info()
+        account = backend.account_info()
+    except Exception as exc:
+        return (ReadinessCheck("terminal_query", False, f"MT5 terminal/account query failed: {exc}"),)
     checks = [ReadinessCheck("terminal_available", terminal is not None, "terminal_info must be available"),
               ReadinessCheck("account_available", account is not None, "account_info must be available")]
     if terminal is not None:
@@ -59,7 +62,10 @@ def audit_symbols(specs: list[BrokerSymbolSpec]) -> tuple[ReadinessCheck, ...]:
 def audit_clock(settings: Settings, backend: Any, specs: list[BrokerSymbolSpec]) -> tuple[ReadinessCheck, ...]:
     if not specs:
         return (ReadinessCheck("clock_skew", False, "clock skew cannot be measured without resolved symbols"),)
-    tick = backend.symbol_info_tick(specs[0].name)
+    try:
+        tick = backend.symbol_info_tick(specs[0].name)
+    except Exception as exc:
+        return (ReadinessCheck("clock_skew", False, f"broker tick query failed: {exc}"),)
     raw = getattr(tick, "time", None) if tick is not None else None
     if raw is None:
         return (ReadinessCheck("clock_skew", False, "broker tick timestamp unavailable for clock-skew check"),)

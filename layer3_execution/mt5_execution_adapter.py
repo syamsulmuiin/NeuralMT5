@@ -64,12 +64,18 @@ class MT5ExecutionAdapter:
 
     def order_send(self, request: dict[str, Any]) -> MT5ExecutionReceipt:
         native = self._native_request(request)
-        check = self.mt5.order_check(native)
+        try:
+            check = self.mt5.order_check(native)
+        except Exception as exc:
+            raise RuntimeError(f"MT5 order_check raised: {exc}") from exc
         if check is None:
             raise RuntimeError(f"MT5 order_check returned None: {self.mt5.last_error()}")
         if int(getattr(check, "retcode", -1)) != 0:
             raise RuntimeError(f"MT5 order_check rejected request: retcode={getattr(check, 'retcode', None)} comment={getattr(check, 'comment', '')}")
-        result = self.mt5.order_send(native)
+        try:
+            result = self.mt5.order_send(native)
+        except Exception as exc:
+            raise RuntimeError(f"MT5 order_send raised: {exc}") from exc
         if result is None:
             raise RuntimeError(f"MT5 order_send returned None: {self.mt5.last_error()}")
         code = int(getattr(result, "retcode", -1))
@@ -96,10 +102,16 @@ class MT5ExecutionAdapter:
             "comment": f"{self.settings.mt5_order_comment}:flat"[:31], "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_type(),
         }
-        check = self.mt5.order_check(native)
+        try:
+            check = self.mt5.order_check(native)
+        except Exception as exc:
+            raise RuntimeError(f"MT5 close order_check raised: {exc}") from exc
         if check is None or int(getattr(check, "retcode", -1)) != 0:
             raise RuntimeError(f"MT5 close order_check failed: {getattr(check, 'retcode', None)} {getattr(check, 'comment', '')}")
-        result = self.mt5.order_send(native)
+        try:
+            result = self.mt5.order_send(native)
+        except Exception as exc:
+            raise RuntimeError(f"MT5 close order_send raised: {exc}") from exc
         if result is None:
             raise RuntimeError(f"MT5 close order_send returned None: {self.mt5.last_error()}")
         code = int(getattr(result, "retcode", -1))

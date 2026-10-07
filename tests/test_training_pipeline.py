@@ -85,3 +85,28 @@ def test_evaluate_reports_confusion_and_prediction_counts():
     assert sum(metrics['predicted_class_counts'].values()) == len(samples)
     assert set(metrics['confusion_matrix']) == {'BUY','SELL','HOLD'}
     assert sum(sum(row.values()) for row in metrics['confusion_matrix'].values()) == len(samples)
+
+def test_training_early_stopping_settings_defaults():
+    s=Settings(_env_file=None)
+    assert s.train_early_stopping_patience >= 1
+    assert s.train_early_stopping_min_delta >= 0.0
+
+
+def test_macro_f1_penalizes_single_class_prediction_collapse():
+    class AlwaysSell(torch.nn.Module):
+        def eval(self):
+            return self
+        def forward(self, htf, mtf, ltf):
+            n = htf.shape[0]
+            p = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32).repeat(n, 1)
+            return {
+                'probabilities': p,
+                'quality': torch.full((n, 2), .5),
+                'excursion': torch.full((n, 2), .5),
+            }
+    samples = [_seq_sample(i % 3, i) for i in range(12)]
+    scaler = fit_scaler(samples)
+    metrics = evaluate(AlwaysSell(), samples, scaler, 4)
+    assert metrics['balanced_accuracy'] == pytest.approx(1 / 3)
+    assert metrics['macro_f1'] < metrics['balanced_accuracy']
+    assert metrics['predicted_class_coverage'] == 1

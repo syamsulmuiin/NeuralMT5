@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import signal
+import sys
 from pathlib import Path
 
 from config.settings import Settings, TradingMode
@@ -17,10 +18,11 @@ from dashboard.isolation import start_dashboard_isolated
 from layer1_market.mt5_client import MT5Client
 from layer1_market.features import FEATURE_VERSION
 from layer2_brain.artifacts import load_model_artifact
-from layer2_brain.network import MultiTimeframeBrain, set_deterministic
+from layer2_brain.network import NETWORK_VERSION, MultiTimeframeBrain, set_deterministic
 from layer2_brain.scaler import StandardScalerArtifact
 from runtime.orchestrator import NeuralMT5Runtime
 from runtime.worker import IsolatedWorker
+from utils.error_handling import write_crash_report
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,13 +51,19 @@ def _load_brain(settings: Settings):
         expected_feature_version=FEATURE_VERSION,
         expected_scaler_version=scaler.version,
         expected_scaler_hash=scaler_hash,
+        expected_network_version=NETWORK_VERSION,
     )
     return model, scaler
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    settings = validate_settings(Settings())
+    try:
+        settings = validate_settings(Settings())
+    except Exception as exc:
+        print(f"Configuration validation failed: {exc}", file=sys.stderr)
+        print("Next step: compare .env with .env.example, correct the configuration, then rerun python main.py.", file=sys.stderr)
+        return 2
     print("NeuralMT5 configuration validated.")
     print(f"mode={settings.trading_mode} symbols={','.join(settings.symbols)}")
     print(f"timeframes={settings.htf}/{settings.mtf}/{settings.ltf}")
@@ -64,7 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.run:
         print("Safe bootstrap only. Use --run explicitly to start MT5 integration.")
         return 0
-    model, scaler = _load_brain(settings)
+    try:
+        model, scaler = _load_brain(settings)
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"Runtime prerequisite failed: {exc}", file=sys.stderr)
+        print("Required order: python train.py --diagnose -> python train.py -> review passed=true -> python train.py --promote -> python backtest.py -> forward test.", file=sys.stderr)
+        return 2
     runtime = NeuralMT5Runtime(settings, client=MT5Client(), model=model, scaler=scaler)
     learning_worker = IsolatedWorker()
     learning_worker.start()
@@ -86,6 +99,16 @@ def main(argv: list[str] | None = None) -> int:
                 command_gateway=runtime.gateway,
             )
         runtime.run(max_cycles=1 if args.once else None)
+    except (ConnectionError, RuntimeError, ValueError, PermissionError, OSError) as exc:
+        print(f"Runtime stopped safely: {exc}", file=sys.stderr)
+        print("Review the error, MT5 state, and storage/reports/real_host_preflight.json before retrying.", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        path = write_crash_report("runtime", exc)
+        print(f"Unexpected runtime failure: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if path is not None:
+            print(f"Technical traceback saved to {path}", file=sys.stderr)
+        return 3
     finally:
         learning_worker.stop()
         runtime.stop()

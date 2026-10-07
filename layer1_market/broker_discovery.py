@@ -41,7 +41,10 @@ def symbol_spec_from_mt5(info: Any) -> BrokerSymbolSpec:
 
 def discover_symbols(client: MT5Client) -> tuple[BrokerSymbolSpec, ...]:
     client.require_connected()
-    raw = client.backend.symbols_get()
+    try:
+        raw = client.backend.symbols_get()
+    except Exception as exc:
+        raise RuntimeError(f"MT5 symbols_get raised: {exc}") from exc
     if raw is None:
         raise RuntimeError(f"MT5 symbols_get failed: {client.backend.last_error()}")
     specs: list[BrokerSymbolSpec] = []
@@ -56,7 +59,10 @@ def discover_symbols(client: MT5Client) -> tuple[BrokerSymbolSpec, ...]:
 
 def discover_account(client: MT5Client) -> AccountSnapshot:
     client.require_connected()
-    info = client.backend.account_info()
+    try:
+        info = client.backend.account_info()
+    except Exception as exc:
+        raise RuntimeError(f"MT5 account_info raised: {exc}") from exc
     if info is None:
         raise RuntimeError(f"MT5 account_info failed: {client.backend.last_error()}")
     return AccountSnapshot(

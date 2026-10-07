@@ -168,3 +168,24 @@ Then separately acknowledge readiness and enable live execution. Do not combine 
 ## Challenger classification validation
 
 Training applies deterministic class-balanced classification weights derived from the training split only and keeps the classification objective dominant over auxiliary quality/excursion heads. The training report records class weights, predicted-class counts, per-class recall, and a confusion matrix. A failed validation keeps `python train.py --promote` blocked; the gate must not be bypassed by editing reports or lowering thresholds solely to obtain a pass.
+
+
+## Training checkpoint selection
+
+Training evaluates the chronological validation split after every epoch. The saved Challenger is restored from the epoch with the best validation balanced accuracy, using classification loss as a tie-break. Deterministic early stopping is controlled by `TRAIN_EARLY_STOPPING_PATIENCE` and `TRAIN_EARLY_STOPPING_MIN_DELTA`. This prevents a lower-quality final epoch from replacing an earlier better validation checkpoint. Promotion thresholds are not weakened by this mechanism.
+## Neural artifact version check
+
+Current training produces `cnn-gru-hierarchical-v2` artifacts. Before backtest or forward testing, verify the promoted Champion was trained with the current code. Older flat three-class artifacts are intentionally rejected by runtime/backtest network-version validation and must be retrained; do not bypass the compatibility check. Review `training_report.json` for `macro_f1`, predicted-class coverage, per-class recall, and the confusion matrix before promotion.
+
+
+
+## Workflow prerequisite errors and historical-range auditability
+
+Top-level CLI commands are required to fail closed with a concise prerequisite explanation and a next-step command for expected operational errors (for example promotion before validation, runtime before Champion promotion, or training while LIVE mode is selected). Expected user-order failures must not require interpreting an unhandled Python traceback.
+
+Training-data provenance is also part of the audit contract. `TRAIN_HISTORY_BARS` is a count of most-recent closed candles **per timeframe**, not a fixed number of calendar days. `training_data_diagnostics.json` records actual per-timeframe UTC history ranges and the effective sample range. `training_report.json` records the full dataset decision-time range plus the chronological train/validation/test ranges. These timestamps are the authoritative record of what period was actually used on a specific broker/host.
+
+## Failure reporting during host validation
+
+Operational failures must be treated as failed checks, not as missing/empty data. MT5 shutdown failures are recorded in the preflight result; report-write failures return a non-zero exit code. If an unexpected CLI failure occurs, inspect `storage/logs/crash-*.log` for the preserved traceback before retrying. Never set LIVE attestation flags to bypass an exception.
+

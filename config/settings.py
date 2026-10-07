@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     train_classification_loss_weight: float = Field(1.00, gt=0.0)
     train_quality_loss_weight: float = Field(0.25, ge=0.0)
     train_excursion_loss_weight: float = Field(0.25, ge=0.0)
+    train_early_stopping_patience: int = Field(5, ge=1)
+    train_early_stopping_min_delta: float = Field(0.001, ge=0.0)
     backtest_history_bars: int = Field(5000, ge=500)
     backtest_initial_equity: float = Field(10000.0, gt=0.0)
     dataset_version: str = "dataset-v1"

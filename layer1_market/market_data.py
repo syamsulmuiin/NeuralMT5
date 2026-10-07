@@ -47,7 +47,13 @@ def fetch_recent_candles(
         raise ValueError("count must be positive")
     start_pos = 0 if include_forming else 1
     tf = native_timeframe(client.backend, timeframe)
-    rates = client.backend.copy_rates_from_pos(symbol, tf, start_pos, count)
+    try:
+        rates = client.backend.copy_rates_from_pos(symbol, tf, start_pos, count)
+    except Exception as exc:
+        raise RuntimeError(f"copy_rates_from_pos raised for {symbol}/{timeframe}: {exc}") from exc
     if rates is None:
         raise RuntimeError(f"copy_rates_from_pos failed for {symbol}/{timeframe}: {client.backend.last_error()}")
-    return rates_to_candles(rates)
+    try:
+        return rates_to_candles(rates)
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError) as exc:
+        raise RuntimeError(f"invalid MT5 candle payload for {symbol}/{timeframe}: {exc}") from exc

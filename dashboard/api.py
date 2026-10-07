@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config.settings import Settings
@@ -14,7 +14,7 @@ from config.validation import validate_settings
 from .auth import DashboardSecurity
 from .commands import CommandGateway
 from .schemas import CommandReceipt, CommandRequest, PaginatedResult, RuntimeMode, SystemInfo
-from .service import DashboardRepository
+from .service import DashboardDataError, DashboardRepository
 from .state import RuntimeState
 from .websocket import EventBus
 
@@ -62,6 +62,12 @@ def create_app(
     app.state.command_gateway = gateway
     app.state.repository = repository
     app.state.settings = settings
+
+    @app.exception_handler(DashboardDataError)
+    async def dashboard_data_error_handler(_request: Request, exc: DashboardDataError):
+        with state._lock:
+            state.last_error = str(exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc), "status": "DEGRADED"})
 
     async def secure(request: Request) -> None:
         security.verify_request(request)

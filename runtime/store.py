@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,14 @@ class RuntimeStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).parents[1] / "storage/database/schema.sql"
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            schema_sql = schema.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"failed to prepare runtime database {self.path}: {exc}") from exc
         with self._connect() as conn:
-            conn.executescript(schema.read_text(encoding="utf-8"))
+            conn.executescript(schema_sql)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runtime_state (
@@ -42,11 +47,42 @@ class RuntimeStore:
             if "mt5_deal_ticket" not in columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN mt5_deal_ticket INTEGER")
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10.0)
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 10000")
-        return conn
+    @contextmanager
+    def _connect(self):
+        conn = None
+        try:
+            conn = sqlite3.connect(self.path, timeout=10.0)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 10000")
+            yield conn
+            conn.commit()
+        except sqlite3.IntegrityError:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+            raise
+        except sqlite3.Error as exc:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+            raise RuntimeError(f"runtime database operation failed ({self.path}): {exc}") from exc
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+            raise
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
 
     def set_state(self, key: str, value: Any) -> None:
         now = datetime.now(UTC).isoformat()

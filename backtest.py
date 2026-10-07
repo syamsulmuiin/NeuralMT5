@@ -17,9 +17,10 @@ from layer1_market.mt5_client import MT5Client
 from layer1_market.symbol_resolver import inspect_symbol_candidates, resolve_symbol
 from layer1_market.features import FEATURE_VERSION
 from layer2_brain.artifacts import load_model_artifact
-from layer2_brain.network import MultiTimeframeBrain, set_deterministic
+from layer2_brain.network import NETWORK_VERSION, MultiTimeframeBrain, set_deterministic
 from layer2_brain.scaler import StandardScalerArtifact
 from layer4_learning.backtest import run_historical_pipeline
+from utils.error_handling import write_crash_report
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,6 +48,7 @@ def _load_champion(settings: Settings):
         expected_feature_version=FEATURE_VERSION,
         expected_scaler_version=scaler.version,
         expected_scaler_hash=scaler_hash,
+        expected_network_version=NETWORK_VERSION,
     )
     model.eval()
     return model, scaler, meta
@@ -65,18 +67,21 @@ def _strict_json(value):
 
 def _write_reports(report: dict, trades: list[dict]) -> None:
     out = Path("storage/reports")
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "backtest_report.json").write_text(json.dumps(_strict_json(report), indent=2, default=str, allow_nan=False), encoding="utf-8")
-    path = out / "backtest_trades.csv"
     fields = [
         "symbol", "broker_symbol", "decision_time_utc", "entry_time_utc", "exit_time_utc",
         "direction", "entry", "stop_loss", "take_profit", "exit_price", "exit_reason", "realized_r",
     ]
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=fields)
-        w.writeheader()
-        for row in trades:
-            w.writerow({k: row.get(k) for k in fields})
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "backtest_report.json").write_text(json.dumps(_strict_json(report), indent=2, default=str, allow_nan=False), encoding="utf-8")
+        path = out / "backtest_trades.csv"
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            for row in trades:
+                w.writerow({k: row.get(k) for k in fields})
+    except (OSError, TypeError, ValueError, csv.Error) as exc:
+        raise RuntimeError(f"failed to write backtest reports in {out}: {exc}") from exc
 
 
 def run_backtest(settings: Settings, *, bars: int | None = None, symbols: list[str] | None = None) -> dict:
@@ -183,9 +188,16 @@ def main(argv: list[str] | None = None) -> int:
             print("No symbol completed backtest; review the report before forward testing.", file=sys.stderr)
             return 2
         return 0
-    except (FileNotFoundError, RuntimeError, ValueError, ConnectionError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError, ConnectionError, OSError) as exc:
         print(f"Backtest failed: {exc}", file=sys.stderr)
+        print("Next step: correct the reported prerequisite/data/artifact problem, then rerun python backtest.py.", file=sys.stderr)
         return 2
+    except Exception as exc:
+        path = write_crash_report("backtest", exc)
+        print(f"Unexpected backtest failure: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if path is not None:
+            print(f"Technical traceback saved to {path}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

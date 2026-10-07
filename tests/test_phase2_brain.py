@@ -56,3 +56,56 @@ def test_model_rejects_scaler_content_hash_mismatch(tmp_path):
     target=MultiTimeframeBrain(2,8,0)
     with pytest.raises(ValueError,match='content hash'):
         load_model_artifact(p,target,expected_feature_names=('a','b'),expected_feature_version='f1',expected_scaler_version='s1',expected_scaler_hash='changed')
+
+def test_hierarchical_head_keeps_public_three_class_contract():
+    set_deterministic(11)
+    model = MultiTimeframeBrain(2, 8, 0)
+    x = torch.randn(5, 8, 2)
+    out = model(x, x, x)
+    assert out['probabilities'].shape == (5, 3)
+    assert torch.allclose(out['probabilities'].sum(dim=1), torch.ones(5), atol=1e-6)
+    assert torch.all((out['probabilities'] >= 0) & (out['probabilities'] <= 1))
+    assert out['trade_logit'].shape == (5,)
+    assert out['direction_logits'].shape == (5, 2)
+
+
+def test_hierarchical_loss_trains_hold_gate_and_direction_head():
+    from layer2_brain.trainer import TrainingBatch, train_epoch
+    set_deterministic(12)
+    model = MultiTimeframeBrain(2, 8, 0)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    opt = torch.optim.Adam(model.parameters(), lr=.001)
+    x = torch.randn(6, 8, 2)
+    batch = TrainingBatch(
+        x, x, x,
+        torch.tensor([0, 1, 2, 0, 1, 2]),
+        torch.full((6, 2), .5),
+        torch.full((6, 2), .5),
+    )
+    loss = train_epoch(
+        model, [batch], opt,
+        trade_pos_weight=torch.tensor(.5),
+        direction_weights=torch.tensor([1., 1.]),
+    )
+    assert loss > 0
+    assert not torch.equal(before['actionability.weight'], model.state_dict()['actionability.weight'])
+    assert not torch.equal(before['direction.weight'], model.state_dict()['direction.weight'])
+
+
+def test_model_artifact_rejects_network_version_mismatch(tmp_path):
+    from layer2_brain.artifacts import save_model_artifact, load_model_artifact
+    set_deterministic(13)
+    model = MultiTimeframeBrain(2, 8, 0)
+    path = tmp_path / 'network-version.pt'
+    save_model_artifact(
+        model, path,
+        feature_names=('a', 'b'), feature_version='f1', network_version='old-v1',
+        scaler_version='s1', random_seed=13,
+    )
+    target = MultiTimeframeBrain(2, 8, 0)
+    with pytest.raises(ValueError, match='network version'):
+        load_model_artifact(
+            path, target,
+            expected_feature_names=('a', 'b'), expected_feature_version='f1',
+            expected_scaler_version='s1', expected_network_version='new-v2',
+        )

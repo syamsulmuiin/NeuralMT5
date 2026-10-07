@@ -27,7 +27,7 @@ The repository now closes the code-level Critical and H1–H5 blockers identifie
 
 ## Regression evidence
 
-The complete suite contains **134 tests** and passes after blocker closure. `python -m compileall` also passes.
+The complete suite contains **143 tests** and passes after blocker closure. `python -m compileall` also passes.
 
 ## Remaining real-host gate
 
@@ -67,7 +67,7 @@ The post-training-CLI audit closed additional defects that were not exercised by
 - account equity is refreshed each runtime cycle before new risk sizing;
 - model loading verifies feature implementation version and scaler content hash, not version strings alone.
 
-The regression baseline after this audit is **134 tests passing** plus successful `compileall`. Real-host/broker evidence remains separate from software regression.
+The regression baseline after this audit is **146 tests passing** plus successful `compileall`. Real-host/broker evidence remains separate from software regression.
 
 ## Documentation synchronization rule
 
@@ -81,3 +81,30 @@ The production historical replay engine is exposed through the top-level `python
 ## Challenger classification validation
 
 Training applies deterministic class-balanced classification weights derived from the training split only and keeps the classification objective dominant over auxiliary quality/excursion heads. The training report records class weights, predicted-class counts, per-class recall, and a confusion matrix. A failed validation keeps `python train.py --promote` blocked; the gate must not be bypassed by editing reports or lowering thresholds solely to obtain a pass.
+
+
+## Training checkpoint selection
+
+Training evaluates the chronological validation split after every epoch. The saved Challenger is restored from the epoch with the best validation balanced accuracy, using classification loss as a tie-break. Deterministic early stopping is controlled by `TRAIN_EARLY_STOPPING_PATIENCE` and `TRAIN_EARLY_STOPPING_MIN_DELTA`. This prevents a lower-quality final epoch from replacing an earlier better validation checkpoint. Promotion thresholds are not weakened by this mechanism.
+## Hierarchical Neural Classification Hardening
+
+The local neural brain now uses network version `cnn-gru-hierarchical-v2`. The classification path is hierarchical: an actionability head first learns `TRADE` versus `HOLD`, then a direction head learns `BUY` versus `SELL` only for actionable samples. Runtime still receives normalized BUY/SELL/HOLD probabilities, so Layer 3 contracts do not change. Training-only balancing weights are derived from the chronological training split. The TRADE/HOLD gate uses full binary balancing; BUY/SELL direction weights use the configured tempered correction.
+
+Validation checkpoint selection uses macro-F1 as the primary metric, then balanced accuracy and classification loss as deterministic tie-breaks. This explicitly penalizes single-class prediction collapse; a model that predicts every validation row as one class can no longer be retained merely because balanced accuracy equals `1/3`. Model artifacts now enforce `network_version`, and old flat-head artifacts fail closed and require retraining. Promotion thresholds remain unchanged.
+
+
+
+## Workflow prerequisite errors and historical-range auditability
+
+Top-level CLI commands are required to fail closed with a concise prerequisite explanation and a next-step command for expected operational errors (for example promotion before validation, runtime before Champion promotion, or training while LIVE mode is selected). Expected user-order failures must not require interpreting an unhandled Python traceback.
+
+Training-data provenance is also part of the audit contract. `TRAIN_HISTORY_BARS` is a count of most-recent closed candles **per timeframe**, not a fixed number of calendar days. `training_data_diagnostics.json` records actual per-timeframe UTC history ranges and the effective sample range. `training_report.json` records the full dataset decision-time range plus the chronological train/validation/test ranges. These timestamps are the authoritative record of what period was actually used on a specific broker/host.
+
+## Exception-handling boundary audit
+
+The current baseline includes a full boundary-focused exception-handling pass. Guarded areas include MT5 initialization/shutdown, symbol/account/history/tick calls, native order check/send, SQLite runtime/journal/idempotency/model-registry transactions, model/scaler artifact loading and saving, Challenger promotion file operations, training/backtest/preflight report writes, dashboard database reads, startup recovery, and CLI entry points.
+
+The audit explicitly rejects blanket `try/except` around deterministic pure functions. Boundary failures add operation context and preserve the original cause; SQLite operations rollback on failure; expected duplicate-key integrity errors remain typed where runtime logic depends on them; dashboard database failures surface as degraded `503` responses instead of empty datasets; unexpected CLI exceptions are retained in `storage/logs/crash-*.log`; and runtime safety-maintenance failures pause new entries. Silent `except: pass` handling is not permitted for operational failures.
+
+Regression baseline after this audit: **146 tests passing** plus successful `compileall`.
+

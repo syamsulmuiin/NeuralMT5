@@ -29,7 +29,6 @@ def save_model_artifact(
     scaler_hash: str | None = None,
 ) -> dict:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     meta = {
         "network_version": network_version,
         "feature_version": feature_version,
@@ -39,8 +38,12 @@ def save_model_artifact(
         "random_seed": random_seed,
         "weights_hash": weights_hash(model),
     }
-    torch.save({"state_dict": model.state_dict(), "metadata": meta}, path)
-    path.with_suffix(path.suffix + ".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"state_dict": model.state_dict(), "metadata": meta}, path)
+        path.with_suffix(path.suffix + ".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to save model artifact {path}: {exc}") from exc
     return meta
 
 
@@ -52,9 +55,18 @@ def load_model_artifact(
     expected_feature_version: str,
     expected_scaler_version: str,
     expected_scaler_hash: str | None = None,
+    expected_network_version: str | None = None,
 ) -> dict:
-    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
-    meta = payload["metadata"]
+    path = Path(path)
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        meta = payload["metadata"]
+    except FileNotFoundError:
+        raise
+    except (OSError, RuntimeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to load model artifact {path}: {exc}") from exc
+    if expected_network_version is not None and meta.get("network_version") != expected_network_version:
+        raise ValueError("model network version mismatch; retrain Champion")
     if tuple(meta["feature_names"]) != tuple(expected_feature_names):
         raise ValueError("model feature schema mismatch")
     if meta.get("feature_version") != expected_feature_version:
@@ -63,7 +75,10 @@ def load_model_artifact(
         raise ValueError("model/scaler version mismatch")
     if expected_scaler_hash is not None and meta.get("scaler_hash") != expected_scaler_hash:
         raise ValueError("model/scaler content hash mismatch")
-    model.load_state_dict(payload["state_dict"])
+    try:
+        model.load_state_dict(payload["state_dict"])
+    except (RuntimeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"model state is incompatible with current network: {exc}") from exc
     if weights_hash(model) != meta["weights_hash"]:
         raise ValueError("model weights hash mismatch")
     return meta

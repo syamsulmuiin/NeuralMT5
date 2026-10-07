@@ -68,8 +68,8 @@ def main() -> int:
     finally:
         try:
             client.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            checks.append({"check": "mt5_shutdown", "passed": False, "detail": f"MT5 shutdown failed: {exc}"})
 
     output = {
         "generated_at_utc": datetime.now(UTC).isoformat(),
@@ -79,9 +79,13 @@ def main() -> int:
         "checks": checks,
         "note": "Passing this report does NOT set LIVE_FAULT_INJECTION_PASSED or LIVE_SOAK_TEST_PASSED.",
     }
-    Path("storage/reports").mkdir(parents=True, exist_ok=True)
     out = Path("storage/reports/real_host_preflight.json")
-    out.write_text(json.dumps(output, indent=2, default=str), encoding="utf-8")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(output, indent=2, default=str), encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"Preflight completed but report write failed: {exc}", file=sys.stderr)
+        return 3
     print(json.dumps(output, indent=2, default=str))
     print(f"report={out}")
     return 0 if output["passed"] else 2

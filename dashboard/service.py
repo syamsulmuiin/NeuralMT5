@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 
+class DashboardDataError(RuntimeError):
+    pass
+
+
 class DashboardRepository:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -21,8 +25,8 @@ class DashboardRepository:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 return [dict(row) for row in conn.execute(sql, params).fetchall()]
-        except sqlite3.Error:
-            return []
+        except sqlite3.Error as exc:
+            raise DashboardDataError(f"dashboard database query failed: {exc}") from exc
 
     def recent_market(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._query("SELECT observation_id,symbol,broker_symbol,observed_at_utc,timeframe_htf,timeframe_mtf,timeframe_ltf,feature_version,dataset_version,feature_payload_json FROM observations ORDER BY observed_at_utc DESC LIMIT ?", (limit,))

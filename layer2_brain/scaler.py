@@ -19,7 +19,20 @@ class StandardScalerArtifact:
     def transform(self, x: np.ndarray, feature_names: tuple[str,...]) -> np.ndarray:
         if tuple(feature_names)!=self.feature_names: raise ValueError("feature schema does not match fitted scaler")
         return (np.asarray(x,dtype=np.float32)-np.asarray(self.mean,dtype=np.float32))/np.asarray(self.scale,dtype=np.float32)
-    def save(self,path:str|Path): Path(path).write_text(json.dumps(self.__dict__,indent=2),encoding='utf-8')
+    def save(self,path:str|Path):
+        path=Path(path)
+        try:
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(json.dumps(self.__dict__,indent=2),encoding='utf-8')
+        except (OSError,TypeError,ValueError) as exc:
+            raise RuntimeError(f"failed to save scaler artifact {path}: {exc}") from exc
     @classmethod
     def load(cls,path:str|Path):
-        d=json.loads(Path(path).read_text(encoding='utf-8')); return cls(tuple(d['feature_names']),tuple(d['mean']),tuple(d['scale']),d['version'])
+        path=Path(path)
+        try:
+            d=json.loads(path.read_text(encoding='utf-8'))
+            return cls(tuple(d['feature_names']),tuple(d['mean']),tuple(d['scale']),d['version'])
+        except FileNotFoundError:
+            raise
+        except (OSError,json.JSONDecodeError,KeyError,TypeError,ValueError) as exc:
+            raise RuntimeError(f"failed to load scaler artifact {path}: {exc}") from exc

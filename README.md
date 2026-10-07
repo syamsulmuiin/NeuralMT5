@@ -23,7 +23,7 @@ The system is intentionally designed around **capital preservation, reproducibil
 | Dashboard & API | Implemented |
 | Integrated analysis/paper runtime | Implemented |
 | Software live-readiness controls | Implemented |
-| Automated regression baseline | **134 tests passing** |
+| Automated regression baseline | **146 tests passing** |
 | Real MT5 broker/host validation | **Pending** |
 | LIVE self-certification | **No** |
 
@@ -159,6 +159,26 @@ At minimum, keep `README.md`, `.env.example`, `docs/FINAL_FULL_PROJECT_AUDIT.md`
 
 ---
 
+# Error Handling & Recovery Policy
+
+NeuralMT5 treats external boundaries as failure-prone. MT5 calls, SQLite transactions, model/scaler artifact I/O, report writing, promotion file copies, dashboard database reads, and CLI entry points are guarded with contextual exception handling.
+
+Rules:
+
+- use `try/except/finally` at recoverable I/O and integration boundaries, not around pure deterministic calculations;
+- preserve the original exception chain with `raise ... from exc`;
+- rollback SQLite transactions on failure and always close connections;
+- never convert database/MT5 failures into fake success or empty data;
+- duplicate-key `sqlite3.IntegrityError` remains distinguishable where duplicate detection is intentional;
+- cleanup failures are reported without hiding the primary error;
+- expected operational failures produce concise user-facing guidance;
+- unexpected CLI failures write a full traceback to `storage/logs/crash-*.log` and return a non-zero exit code;
+- runtime safety-maintenance failures pause new entries and fail closed.
+
+A `try` block is intentionally **not** added to every pure function. Blanket catch-all handling inside feature math, scoring, validation, or deterministic transforms would hide programming defects. Exception handling is applied where the function crosses a boundary that can legitimately fail.
+
+---
+
 # Architecture
 
 NeuralMT5 uses four trading domains.
@@ -187,12 +207,21 @@ Important distinction: tick activity, spread dynamics, bid/ask movement, rejecti
 
 Directory: [`layer2_brain/`](layer2_brain)
 
-Baseline architecture:
+Baseline architecture (`cnn-gru-hierarchical-v2`):
 
 ```text
 HTF sequence → Conv1D → GRU ─┐
-MTF sequence → Conv1D → GRU ─┼→ Fusion → Multi-task heads
-LTF sequence → Conv1D → GRU ─┘
+MTF sequence → Conv1D → GRU ─┼→ Fusion → Actionability head: TRADE vs HOLD
+LTF sequence → Conv1D → GRU ─┘          └→ Direction head: BUY vs SELL (only when TRADE)
+                                      └→ Quality / excursion auxiliary heads
+```
+
+The public runtime contract remains three normalized probabilities. Internally, HOLD is learned as an actionability decision instead of competing directly with BUY and SELL in one flat softmax. Conditional on TRADE, a second head learns BUY versus SELL. The combined output is:
+
+```text
+P(BUY)  = P(TRADE) × P(BUY | TRADE)
+P(SELL) = P(TRADE) × P(SELL | TRADE)
+P(HOLD) = 1 - P(TRADE)
 ```
 
 Outputs include:
@@ -594,19 +623,127 @@ See [`.env.example`](.env.example) for the complete configuration surface.
 
 # Running NeuralMT5
 
+## Fresh clone → training → backtest → forward test → LIVE
 
-## Train → Forward Test → Live Workflow
+This is the canonical operational sequence. Each stage is a prerequisite gate for the next one. NeuralMT5 now reports expected prerequisite failures as a short explanation plus the next command instead of requiring users to interpret a Python traceback.
 
-NeuralMT5 does not create dummy model artifacts. Before the integrated runtime can perform neural inference, train a local Challenger from MT5 historical **closed candles**:
+### Step 1 — Clone and create the environment
+
+```powershell
+git clone https://github.com/syamsulmuiin/NeuralMT5.git
+cd NeuralMT5
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-mt5.txt
+Copy-Item .env.example .env
+```
+
+Purpose: create a clean local installation with the MT5 integration dependencies. Keep `.env` private and never commit it.
+
+### Step 2 — Configure `.env`
+
+Start safely:
+
+```env
+TRADING_MODE=analysis
+SYMBOLS=XAUUSD
+HTF=M15
+MTF=M5
+LTF=M1
+```
+
+If the broker symbol is already known, an explicit safe override is allowed:
+
+```env
+SYMBOL_XAUUSD=XAUUSD.vx
+```
+
+Replay/custom/non-openable symbols remain rejected even when an override is supplied.
+
+### Step 3 — Validate configuration only
+
+```powershell
+python main.py
+```
+
+This does **not** connect the integrated runtime or send orders. It validates configuration and prints the selected mode, symbols, and timeframes.
+
+If configuration is invalid, fix the key named by the error and rerun this step.
+
+### Step 4 — Diagnose symbol resolution and training data
 
 ```powershell
 python train.py --diagnose
+```
+
+This step does not train a model. It connects to MT5 and verifies:
+
+- canonical → broker symbol resolution;
+- replay/custom/non-openable rejection;
+- broker history availability for HTF / MTF / LTF;
+- feature-row generation;
+- synchronized sequence generation;
+- resulting training sample count and class distribution.
+
+Output:
+
+```text
+storage/reports/training_data_diagnostics.json
+```
+
+Do not continue if the selected broker symbol is wrong or `samples` is below the configured minimum.
+
+#### Exactly what historical period is used?
+
+`TRAIN_HISTORY_BARS=5000` means **request the most recent 5000 CLOSED candles for each configured timeframe**. It does **not** mean 5000 minutes and does not imply one identical calendar range for every timeframe.
+
+With `M15/M5/M1`, 5000 candles have different theoretical durations:
+
+```text
+M15: 5000 × 15 minutes
+M5 : 5000 ×  5 minutes
+M1 : 5000 ×  1 minute
+```
+
+Actual broker history can contain weekends/session closures and therefore the real elapsed calendar duration can differ. The effective training samples are built from timestamps where all required point-in-time HTF/MTF/LTF sequences exist, so the final sample period can be shorter than any raw history request.
+
+NeuralMT5 records the **actual UTC period received and used**. In `training_data_diagnostics.json`, inspect:
+
+```text
+symbols.<SYMBOL>.history_ranges.<TIMEFRAME>.start_utc
+symbols.<SYMBOL>.history_ranges.<TIMEFRAME>.end_utc
+symbols.<SYMBOL>.history_ranges.<TIMEFRAME>.duration_seconds
+symbols.<SYMBOL>.sample_range.decision_start_utc
+symbols.<SYMBOL>.sample_range.decision_end_utc
+symbols.<SYMBOL>.sample_range.label_end_utc
+```
+
+This is the authoritative answer to “training data is from when to when?” on the current broker/host.
+
+### Step 5 — Train a Challenger
+
+```powershell
 python train.py
 ```
 
-`--diagnose` connects to MT5, resolves the configured symbols, inspects available HTF/MTF/LTF history, and reports exactly how many samples can be built without training. The report is saved to `storage/reports/training_data_diagnostics.json`.
+Training uses historical **closed candles** only. The pipeline is:
 
-The training workflow resolves configured broker symbols, downloads historical HTF/MTF/LTF candles, builds point-in-time features and synchronized sequences, creates deterministic forward labels, performs a chronological train/validation/test split with purge/embargo, fits the scaler on the **training split only**, and trains the local CNN+GRU network. Outputs are:
+```text
+MT5 history
+→ broker symbol resolution
+→ point-in-time HTF/MTF/LTF features
+→ synchronized sequences
+→ forward labels
+→ chronological train/validation/test split
+→ purge + embargo
+→ scaler fitted on TRAIN only
+→ deterministic local neural training
+→ best validation checkpoint
+→ Challenger artifacts
+```
+
+Outputs:
 
 ```text
 storage/models/challenger.pt
@@ -615,13 +752,55 @@ storage/scalers/challenger.json
 storage/reports/training_report.json
 ```
 
-Training never replaces the active Champion automatically. Review `storage/reports/training_report.json`. If `passed` is `true`, promote that exact saved Challenger explicitly:
+The training report now also records:
+
+```text
+dataset_time_range
+split_time_ranges.train
+split_time_ranges.validation
+split_time_ranges.test
+```
+
+Each range includes its real UTC decision start/end; this makes the exact historical period auditable after training.
+
+### Step 6 — Review the Challenger validation result
+
+```powershell
+python -c "import json; r=json.load(open('storage/reports/training_report.json')); print(json.dumps(r, indent=2))"
+```
+
+Required condition before promotion:
+
+```json
+"passed": true
+```
+
+Review at least:
+
+```text
+promotion_blockers
+best_epoch
+val.macro_f1
+val.balanced_accuracy
+val.per_class_recall
+val.predicted_class_counts
+val.confusion_matrix
+test.*
+dataset_time_range
+split_time_ranges
+```
+
+If `passed=false`, the Challenger is rejected. Do not change the report manually and do not bypass the gate.
+
+### Step 7 — Promote the validated Challenger
+
+Only after `passed=true`:
 
 ```powershell
 python train.py --promote
 ```
 
-Promotion does **not** retrain. It verifies the saved model/scaler hashes against the reviewed report, then installs:
+`--promote` does **not train again**. It verifies the exact saved Challenger model/scaler hashes against the reviewed report and installs that artifact as the active Champion:
 
 ```text
 storage/models/champion.pt
@@ -629,81 +808,142 @@ storage/models/champion.pt.json
 storage/scalers/champion.json
 ```
 
-After promotion, run the historical production-pipeline backtest **before** forward testing:
+If this command is run too early, NeuralMT5 prints why promotion is blocked and tells you to return to training/review rather than exposing an unhandled traceback.
+
+### Step 8 — Historical production-pipeline backtest
 
 ```powershell
 python backtest.py
 ```
 
-Optional overrides:
+Optional:
 
 ```powershell
 python backtest.py --bars 8000
 python backtest.py --symbol XAUUSD
 ```
 
-The backtest loads the active Champion/scaler, resolves the same broker symbols, fetches closed MT5 history, and replays the production Layer 1 → Layer 2 → Layer 3 path with next-LTF-bar execution. Reports are written to:
+Outputs:
 
 ```text
 storage/reports/backtest_report.json
 storage/reports/backtest_trades.csv
 ```
 
-Review the backtest report before moving to forward testing. The replay applies production planning, Risk Firewall state (including daily risk/loss and consecutive losses), execution preflight (session/cutoff/stops/freeze), next-LTF-bar execution, and conservative same-bar SL/TP resolution. It remains a candle-based historical simulation: exact intrabar path, broker latency/requotes, commissions, swaps, and real partial-fill microstructure are not reconstructed unless present in the implemented historical model. A successful command execution is **not** by itself evidence of a profitable or robust strategy.
+The backtest reuses production Layer 1 → Layer 2 → Layer 3 components, next-LTF-bar execution, Risk Firewall state, session/cutoff checks, stops/freeze constraints, and conservative same-bar SL/TP handling.
 
-Then run forward analysis or paper testing:
+A backtest that executes successfully is not automatically a profitable-strategy approval. Review performance and behavior before forward testing.
+
+### Step 9 — Forward test in `analysis`
+
+Set:
+
+```env
+TRADING_MODE=analysis
+```
+
+Run:
 
 ```powershell
 python main.py --run
 ```
 
-Recommended `.env` progression is `TRADING_MODE=analysis` first, then `TRADING_MODE=paper`. LIVE remains gated by real-host readiness and must not be enabled merely because training or backtesting succeeded. Training, Challenger promotion, and historical backtesting are blocked while `TRADING_MODE=live`.
+Purpose: use live MT5 market data and the Champion through the full decision pipeline without broker order execution.
 
-Training controls are configured in `.env`:
+For one cycle only:
 
-```env
-TRAIN_HISTORY_BARS=5000
-LABEL_HORIZON_BARS=30
-TRAIN_MIN_SAMPLES=300
-TRAIN_MIN_BALANCED_ACCURACY=0.34
-TRAIN_MIN_CLASS_SAMPLES=20
-TRAIN_CLASS_WEIGHT_POWER=0.50
-TRAIN_CLASSIFICATION_LOSS_WEIGHT=1.00
-TRAIN_QUALITY_LOSS_WEIGHT=0.25
-TRAIN_EXCURSION_LOSS_WEIGHT=0.25
-BACKTEST_HISTORY_BARS=5000
-BACKTEST_INITIAL_EQUITY=10000
-EPOCHS=30
-BATCH_SIZE=64
-LEARNING_RATE=0.001
-RANDOM_SEED=42
+```powershell
+python main.py --run --once
 ```
 
-If training reports insufficient samples, run `python train.py --diagnose` first. The diagnostics distinguish unresolved symbols, `symbol_select` failure, missing broker history, insufficient feature history, sequence-alignment failures, and class distribution. Do not bypass the minimum-sample or validation gates with dummy artifacts.
+### Step 10 — Forward test in `paper`
 
-If Challenger validation fails, `python train.py --promote` remains blocked by design. Training uses class-balanced classification weights computed from the **training split only**, with classification kept as the dominant multitask objective. `training_report.json` includes train class counts, applied class weights, predicted-class counts, and a confusion matrix so failures such as a collapsed HOLD class can be diagnosed directly. Do not lower `TRAIN_MIN_BALANCED_ACCURACY` merely to force promotion; retrain only after addressing the reported failure.
+After analysis behavior is satisfactory, set:
 
+```env
+TRADING_MODE=paper
+```
 
-## Canonical command sequence after clone
+Run:
+
+```powershell
+python main.py --run
+```
+
+Paper mode exercises simulated position lifecycle, monitoring, close handling, journaling, and performance using the production planning/risk flow without sending broker orders.
+
+A longer host soak can be run with:
+
+```powershell
+python tools/host_soak.py --cycles 500
+```
+
+### Step 11 — Real-host preflight
+
+```powershell
+python tools/real_host_preflight.py
+```
+
+Output:
 
 ```text
-Clone / install / configure .env
-        ↓
+storage/reports/real_host_preflight.json
+```
+
+This validates the actual terminal/account/symbol environment and is read-only with respect to native order sending.
+
+### Step 12 — Fault injection and long soak
+
+Follow [`docs/REAL_HOST_VALIDATION.md`](docs/REAL_HOST_VALIDATION.md). Required evidence includes disconnect/reconnect, terminal restart/reconciliation, filling-mode behavior, stops/freeze behavior, session/timezone correctness, and long-duration analysis/paper operation.
+
+Do not set LIVE attestation flags simply because unit tests, training, or backtests pass.
+
+### Step 13 — LIVE only after every gate is genuinely satisfied
+
+LIVE requires explicit configuration such as:
+
+```env
+TRADING_MODE=live
+LIVE_EXECUTION_ENABLED=true
+LIVE_READINESS_ACKNOWLEDGED=true
+LIVE_FAULT_INJECTION_PASSED=true
+LIVE_SOAK_TEST_PASSED=true
+```
+
+and valid MT5 credentials/terminal configuration. These flags are attestations of work actually completed on the real host; they must never be used as shortcuts around failed validation.
+
+Then validate configuration again:
+
+```powershell
+python main.py
+```
+
+and only when all live-readiness gates pass:
+
+```powershell
+python main.py --run
+```
+
+NeuralMT5 is intentionally fail-closed: a missing Champion, invalid artifact version, unresolved symbol, unsafe broker state, failed readiness gate, or reconciliation uncertainty blocks new LIVE entries.
+
+## Command order summary
+
+```text
 python main.py
         ↓
 python train.py --diagnose
         ↓
 python train.py
         ↓
-review training_report.json
+review training_report.json and require passed=true
         ↓
 python train.py --promote
         ↓
 python backtest.py
         ↓
-TRADING_MODE=analysis → python main.py --run
+analysis forward test: python main.py --run
         ↓
-TRADING_MODE=paper → python main.py --run
+paper forward test: python main.py --run
         ↓
 python tools/real_host_preflight.py
         ↓
@@ -711,40 +951,32 @@ fault injection + long soak
         ↓
 human LIVE-readiness review
         ↓
-LIVE only after every explicit gate is satisfied
+LIVE
 ```
 
-Each stage is a gate for the next. Do not replace failed diagnostics, training validation, backtest review, or real-host evidence with dummy artifacts or manually-forced pass flags.
+Running commands out of order is safe: prerequisite failures should explain what is missing and point to the preceding step. The order remains mandatory because later stages depend on artifacts/evidence produced by earlier stages.
 
-## Safe configuration validation only
+## Training controls
 
-```bash
-python main.py
+```env
+TRAIN_HISTORY_BARS=5000
+LABEL_HORIZON_BARS=30
+TRAIN_MIN_SAMPLES=300
+TRAIN_MIN_BALANCED_ACCURACY=0.34
+TRAIN_MIN_CLASS_SAMPLES=20
+EPOCHS=30
+BATCH_SIZE=64
+LEARNING_RATE=0.001
+RANDOM_SEED=42
 ```
 
-This validates configuration and exits. It does not start the integrated MT5 runtime.
+`TRAIN_HISTORY_BARS` is a **per-timeframe candle count**. Always use diagnostics/report timestamps for the real data period rather than converting the number to calendar days by assumption.
 
-## Start integrated runtime
+## Start integrated runtime without dashboard
 
-```bash
-python main.py --run
-```
-
-## Run exactly one market cycle
-
-```bash
-python main.py --run --once
-```
-
-## Run without dashboard
-
-```bash
+```powershell
 python main.py --run --no-dashboard
 ```
-
-The model and scaler paths configured in `.env` must exist and be compatible before the integrated runtime can start.
-
----
 
 # Model & Scaler Artifacts
 
@@ -779,7 +1011,7 @@ python -m pytest
 Current packaged baseline:
 
 ```text
-112 tests passing
+146 tests passing
 ```
 
 Compile audit:

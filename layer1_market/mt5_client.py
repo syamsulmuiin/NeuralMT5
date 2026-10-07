@@ -51,12 +51,27 @@ class MT5Client(AbstractContextManager["MT5Client"]):
             kwargs["server"] = server
         if path:
             kwargs["path"] = path
-        if not self.backend.initialize(**kwargs):
+        try:
+            initialized = self.backend.initialize(**kwargs)
+        except Exception as exc:
+            self.connected = False
+            raise ConnectionError(f"MT5 initialize raised {type(exc).__name__}: {exc}") from exc
+        if not initialized:
             raise ConnectionError(f"MT5 initialize failed: {self.backend.last_error()}")
         self.connected = True
-        terminal = self.backend.terminal_info()
+        try:
+            terminal = self.backend.terminal_info()
+        except Exception as exc:
+            try:
+                self.shutdown()
+            except Exception:
+                self.connected = False
+            raise ConnectionError(f"MT5 terminal_info raised {type(exc).__name__}: {exc}") from exc
         if terminal is None:
-            self.shutdown()
+            try:
+                self.shutdown()
+            except Exception:
+                self.connected = False
             raise ConnectionError(f"MT5 terminal_info unavailable: {self.backend.last_error()}")
 
     def require_connected(self) -> None:
@@ -64,9 +79,17 @@ class MT5Client(AbstractContextManager["MT5Client"]):
             raise RuntimeError("MT5 client is not connected")
 
     def shutdown(self) -> None:
-        if self.connected:
-            self.backend.shutdown()
-        self.connected = False
+        try:
+            if self.connected:
+                self.backend.shutdown()
+        except Exception as exc:
+            raise RuntimeError(f"MT5 shutdown failed: {exc}") from exc
+        finally:
+            self.connected = False
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.shutdown()
+        try:
+            self.shutdown()
+        except Exception:
+            if exc is None:
+                raise

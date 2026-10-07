@@ -160,9 +160,15 @@ class NeuralMT5Runtime:
                 self._sleep(self.settings.runtime_loop_seconds)
 
     def run_once(self) -> RuntimeCycleResult:
-        self._process_commands()
-        self._maintain_positions()
-        self._account = discover_account(self.client)
+        try:
+            self._process_commands()
+            self._maintain_positions()
+            self._account = discover_account(self.client)
+        except Exception as exc:
+            with self.state._lock:
+                self.state.new_entries_paused = True
+            self._record_error(f"cycle pre-entry safety maintenance failed: {exc}", None)
+            raise RuntimeError(f"runtime safety maintenance failed; new entries paused: {exc}") from exc
         cycle_id = str(uuid4())
         started = datetime.now(UTC)
         self.store.begin_cycle(cycle_id, started)
@@ -295,7 +301,10 @@ class NeuralMT5Runtime:
         return "EXECUTED" if execution.actual_entry is not None else "HOLD"
 
     def _current_quote(self, spec: BrokerSymbolSpec) -> MarketQuote:
-        tick = self.client.backend.symbol_info_tick(spec.name)
+        try:
+            tick = self.client.backend.symbol_info_tick(spec.name)
+        except Exception as exc:
+            raise RuntimeError(f"symbol_info_tick raised for {spec.name}: {exc}") from exc
         if tick is None:
             raise RuntimeError(f"symbol_info_tick failed for {spec.name}: {self.client.backend.last_error()}")
         raw_time = getattr(tick, "time", None)
@@ -309,7 +318,10 @@ class NeuralMT5Runtime:
         positions_get = getattr(self.client.backend, "positions_get", None)
         broker_tickets: set[int] = set()
         if callable(positions_get):
-            positions = positions_get() or ()
+            try:
+                positions = positions_get() or ()
+            except Exception as exc:
+                raise RuntimeError(f"MT5 positions_get failed during startup recovery: {exc}") from exc
             broker_tickets = {int(getattr(p, "ticket")) for p in positions if getattr(p, "ticket", None) is not None}
         decision = assess_restart_recovery(broker_tickets=broker_tickets, journal_tickets=self.store.open_journal_tickets())
         with self.state._lock:
